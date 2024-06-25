@@ -1,60 +1,17 @@
-# python test_animate.py \
-#     -i "examples/scarletthead_woman" \
-#     -p "woman.txt" \
-#     --name "scarletthead" \
-#     -o "photomaker_scarletthead"
+DEVICES=1
 
-python test_animate.py \
-    -i "examples/scarletthead_woman" \
-    -p "woman.txt" \
-    --name "scarletthead" \
-    -o "photomakeradapter_clipG_scarletthead" \
-    --ip_adapter
+CUDA_VISIBLE_DEVICES=$DEVICES python test_animate.py \
+    -o "photomaker_clip" \
+    --image 'datasets/Face_data/00002.png' \
+    --name '00002'
 
-python test_animate.py \
-    -i "examples/scarletthead_woman" \
-    -p "woman.txt" \
-    --name "scarletthead" \
-    -o "photomakeradapter_scarletthead" \
-    --ip_adapter \
-    --use_clipl_embed
+# CUDA_VISIBLE_DEVICES=$DEVICES python photomaker_multi_adapter2.py \
+#     -o "photomaker_multi" \
+#     --multi_ip_adapter \
+#     --index 2
 
-
-# python test_animate.py \
-#     -i "examples/yangmi_woman" \
-#     -p "woman.txt" \
-#     --name "yangmi" \
-#     -o "photomaker_yangmi"
-
-# python test_animate.py \
-#     -i "examples/yangmi_woman" \
-#     -p "woman.txt" \
-#     --name "yangmi" \
-#     -o "photomakeradapter_clipG_scarletthead" \
-#     --ip_adapter
-
-# python test_animate.py \
-#     -i "examples/yangmi_woman" \
-#     -p "woman.txt" \
-#     --name "yangmi" \
-#     -o "photomakeradapter_yangmi" \
-#     --ip_adapter \
-#     --use_clipl_embed
-
-# python test_animate.py \
-#     -i "examples/newton_man" \
-#     --name "newton" \
-#     -o "photomaker_newton"
-
-# python test_animate.py \
-#     -i "examples/newton_man" \
-#     --name "newton" \
-#     -o "photomakeradapter_clipG_newton" \
-#     --ip_adapter
-
-# python test_animate.py \
-#     -i "examples/newton_man" \
-#     --name "newton" \
-#     -o "photomakeradapter_newton" \
-#     --ip_adapter \
-#     --use_clipl_embed
+# CUDA_VISIBLE_DEVICES=1 python photomaker_multi_adapter2.py \
+#     -o "photomaker_multi_cliph" \
+#     --multi_ip_adapter \
+#     --clip_h \
+#     --index 2

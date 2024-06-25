@@ -5,8 +5,9 @@ import PIL
 import numpy as np 
 import inspect
 import torch
+import torch.nn as nn
 from torchvision import transforms as T
-
+from diffusers.utils.import_utils import is_xformers_available
 from safetensors import safe_open
 from huggingface_hub.utils import validate_hf_hub_args
 from transformers import CLIPImageProcessor, CLIPTokenizer
@@ -14,6 +15,9 @@ from diffusers import StableDiffusionXLPipeline, AnimateDiffSDXLPipeline
 from diffusers.models.modeling_utils import _LOW_CPU_MEM_USAGE_DEFAULT, load_state_dict
 from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipelineOutput
 from diffusers.pipelines.animatediff import AnimateDiffPipelineOutput
+import math
+
+from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils import (
     USE_PEFT_BACKEND,
     _get_model_file,
@@ -35,6 +39,13 @@ if is_transformers_available():
         IPAdapterAttnProcessor2_0,
     )
 from . import PhotoMakerIDEncoder
+try:
+    import xformers
+    import xformers.ops
+
+    xformers_available = True
+except Exception:
+    xformers_available = False
 
 
 logger = logging.get_logger(__name__)
@@ -352,6 +363,9 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
         prompt_embeds_text_only: Optional[torch.FloatTensor] = None,
         pooled_prompt_embeds_text_only: Optional[torch.FloatTensor] = None,
         use_clipl_embed: Optional[bool] = False,
+        multi_scale: Optional[bool] = False,
+        start_scale: Optional[float] = 0.0,
+        end_scale: Optional[float] = 0.8,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -619,11 +633,17 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
                         [negative_prompt_embeds, prompt_embeds_text_only], dim=0
                     )
                     add_text_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds_text_only], dim=0)
+                    if multi_scale:
+                        print("change to ",start_scale)
+                        self.set_ip_adapter_scale(start_scale)
                 else:
                     current_prompt_embeds = torch.cat(
                         [negative_prompt_embeds, prompt_embeds], dim=0
                     )
                     add_text_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+                    if multi_scale:
+                        print("change to ",end_scale)
+                        self.set_ip_adapter_scale(end_scale)
                 # predict the noise residual
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
                 if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
@@ -1186,3 +1206,805 @@ class PhotoMakerStableDiffusionXLPipeline(StableDiffusionXLPipeline):
             return (image,)
 
         return StableDiffusionXLPipelineOutput(images=image)
+
+
+
+def FeedForward(dim, mult=4):
+    inner_dim = int(dim * mult)
+    return nn.Sequential(
+        nn.LayerNorm(dim),
+        nn.Linear(dim, inner_dim, bias=False),
+        nn.GELU(),
+        nn.Linear(inner_dim, dim, bias=False),
+    )
+
+
+def reshape_tensor(x, heads):
+    bs, length, width = x.shape
+    # (bs, length, width) --> (bs, length, n_heads, dim_per_head)
+    x = x.view(bs, length, heads, -1)
+    # (bs, length, n_heads, dim_per_head) --> (bs, n_heads, length, dim_per_head)
+    x = x.transpose(1, 2)
+    # (bs, n_heads, length, dim_per_head) --> (bs*n_heads, length, dim_per_head)
+    x = x.reshape(bs, heads, length, -1)
+    return x
+
+
+class PerceiverAttention(nn.Module):
+    def __init__(self, *, dim, dim_head=64, heads=8):
+        super().__init__()
+        self.scale = dim_head**-0.5
+        self.dim_head = dim_head
+        self.heads = heads
+        inner_dim = dim_head * heads
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
+        self.to_out = nn.Linear(inner_dim, dim, bias=False)
+
+    def forward(self, x, latents):
+        """
+        Args:
+            x (torch.Tensor): image features
+                shape (b, n1, D)
+            latent (torch.Tensor): latent features
+                shape (b, n2, D)
+        """
+        x = self.norm1(x)
+        latents = self.norm2(latents)
+
+        b, l, _ = latents.shape
+
+        q = self.to_q(latents)
+        kv_input = torch.cat((x, latents), dim=-2)
+        k, v = self.to_kv(kv_input).chunk(2, dim=-1)
+
+        q = reshape_tensor(q, self.heads)
+        k = reshape_tensor(k, self.heads)
+        v = reshape_tensor(v, self.heads)
+
+        # attention
+        scale = 1 / math.sqrt(math.sqrt(self.dim_head))
+        weight = (q * scale) @ (k * scale).transpose(-2, -1)  # More stable with f16 than dividing afterwards
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        out = weight @ v
+
+        out = out.permute(0, 2, 1, 3).reshape(b, l, -1)
+
+        return self.to_out(out)
+
+
+class Resampler(nn.Module):
+    def __init__(
+        self,
+        dim=1024,
+        depth=8,
+        dim_head=64,
+        heads=16,
+        num_queries=8,
+        embedding_dim=768,
+        output_dim=1024,
+        ff_mult=4,
+    ):
+        super().__init__()
+
+        self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim**0.5)
+
+        self.proj_in = nn.Linear(embedding_dim, dim)
+
+        self.proj_out = nn.Linear(dim, output_dim)
+        self.norm_out = nn.LayerNorm(output_dim)
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
+                        FeedForward(dim=dim, mult=ff_mult),
+                    ]
+                )
+            )
+
+    def forward(self, x):
+        latents = self.latents.repeat(x.size(0), 1, 1)
+        x = self.proj_in(x)
+
+        for attn, ff in self.layers:
+            latents = attn(x, latents) + latents
+            latents = ff(latents) + latents
+
+        latents = self.proj_out(latents)
+        return self.norm_out(latents)
+
+
+class AttnProcessor(nn.Module):
+    r"""
+    Default processor for performing attention-related computations.
+    """
+
+    def __init__(
+        self,
+        hidden_size=None,
+        cross_attention_dim=None,
+    ):
+        super().__init__()
+
+    def __call__(
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        temb=None,
+    ):
+        residual = hidden_states
+
+        if attn.spatial_norm is not None:
+            hidden_states = attn.spatial_norm(hidden_states, temb)
+
+        input_ndim = hidden_states.ndim
+
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+        if attn.group_norm is not None:
+            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        hidden_states = torch.bmm(attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
+
+class IPAttnProcessor(nn.Module):
+    r"""
+    Attention processor for IP-Adapater.
+    Args:
+        hidden_size (`int`):
+            The hidden size of the attention layer.
+        cross_attention_dim (`int`):
+            The number of channels in the `encoder_hidden_states`.
+        scale (`float`, defaults to 1.0):
+            the weight scale of image prompt.
+        num_tokens (`int`, defaults to 4 when do ip_adapter_plus it should be 16):
+            The context length of the image features.
+    """
+
+    def __init__(self, hidden_size, cross_attention_dim=None, scale=1.0, num_tokens=4):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.cross_attention_dim = cross_attention_dim
+        self.scale = scale
+        self.num_tokens = num_tokens
+
+        self.to_k_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
+        self.to_v_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
+
+    def __call__(
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        temb=None,
+    ):
+        residual = hidden_states
+
+        if attn.spatial_norm is not None:
+            hidden_states = attn.spatial_norm(hidden_states, temb)
+
+        input_ndim = hidden_states.ndim
+
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+        if attn.group_norm is not None:
+            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        else:
+            # get encoder_hidden_states, ip_hidden_states
+            end_pos = encoder_hidden_states.shape[1] - self.num_tokens
+            encoder_hidden_states, ip_hidden_states = (
+                encoder_hidden_states[:, :end_pos, :],
+                encoder_hidden_states[:, end_pos:, :],
+            )
+            if attn.norm_cross:
+                encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        if xformers_available:
+            hidden_states = self._memory_efficient_attention_xformers(query, key, value, attention_mask)
+        else:
+            attention_probs = attn.get_attention_scores(query, key, attention_mask)
+            hidden_states = torch.bmm(attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # for ip-adapter
+        ip_key = self.to_k_ip(ip_hidden_states)
+        ip_value = self.to_v_ip(ip_hidden_states)
+
+        ip_key = attn.head_to_batch_dim(ip_key)
+        ip_value = attn.head_to_batch_dim(ip_value)
+
+        if xformers_available:
+            ip_hidden_states = self._memory_efficient_attention_xformers(query, ip_key, ip_value, None)
+        else:
+            ip_attention_probs = attn.get_attention_scores(query, ip_key, None)
+            ip_hidden_states = torch.bmm(ip_attention_probs, ip_value)
+        ip_hidden_states = attn.batch_to_head_dim(ip_hidden_states)
+
+        hidden_states = hidden_states + self.scale * ip_hidden_states
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
+    def _memory_efficient_attention_xformers(self, query, key, value, attention_mask):
+        # TODO attention_mask
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
+        hidden_states = xformers.ops.memory_efficient_attention(query, key, value, attn_bias=attention_mask)
+        return hidden_states
+
+class PhotoMakerInstantIDAnimateDiffXLPipline(PhotoMakerAnimateDiffXLPipline):
+    def cuda(self, dtype=torch.float16, use_xformers=False):
+        self.to("cuda", dtype)
+
+        if hasattr(self, "image_proj_model"):
+            self.image_proj_model.to(self.unet.device).to(self.unet.dtype)
+
+        if use_xformers:
+            if is_xformers_available():
+                import xformers
+                from packaging import version
+
+                xformers_version = version.parse(xformers.__version__)
+                if xformers_version == version.parse("0.0.16"):
+                    logger.warning(
+                        "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+                    )
+                self.enable_xformers_memory_efficient_attention()
+            else:
+                raise ValueError("xformers is not available. Make sure it is installed correctly")
+
+    def load_ip_adapter_instantid(self, model_ckpt, image_emb_dim=512, num_tokens=16, scale=0.5):
+        self.set_instantid_image_proj_model(model_ckpt, image_emb_dim, num_tokens)
+        self.set_instantid_ip_adapter(model_ckpt, num_tokens, scale)
+
+    def set_instantid_image_proj_model(self, model_ckpt, image_emb_dim=512, num_tokens=16):
+        image_proj_model = Resampler(
+            dim=1280,
+            depth=4,
+            dim_head=64,
+            heads=20,
+            num_queries=num_tokens,
+            embedding_dim=image_emb_dim,
+            output_dim=self.unet.config.cross_attention_dim,
+            ff_mult=4,
+        )
+
+        image_proj_model.eval()
+
+        self.image_proj_model = image_proj_model.to(self.device, dtype=self.dtype)
+        state_dict = torch.load(model_ckpt, map_location="cpu")
+        if "image_proj" in state_dict:
+            state_dict = state_dict["image_proj"]
+        self.image_proj_model.load_state_dict(state_dict)
+
+        self.image_proj_model_in_features = image_emb_dim
+
+    def set_instantid_ip_adapter(self, model_ckpt, num_tokens, scale):
+        unet = self.unet
+        attn_procs = {}
+        for name in unet.attn_processors.keys():
+            cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
+            if name.startswith("mid_block"):
+                hidden_size = unet.config.block_out_channels[-1]
+            elif name.startswith("up_blocks"):
+                block_id = int(name[len("up_blocks.")])
+                hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+            elif name.startswith("down_blocks"):
+                block_id = int(name[len("down_blocks.")])
+                hidden_size = unet.config.block_out_channels[block_id]
+            if cross_attention_dim is None:
+                attn_procs[name] = AttnProcessor().to(unet.device, dtype=unet.dtype)
+            else:
+                attn_procs[name] = IPAttnProcessor(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    scale=scale,
+                    num_tokens=num_tokens,
+                ).to(unet.device, dtype=unet.dtype)
+        unet.set_attn_processor(attn_procs)
+
+        state_dict = torch.load(model_ckpt, map_location="cpu")
+        ip_layers = torch.nn.ModuleList(self.unet.attn_processors.values())
+        if "ip_adapter" in state_dict:
+            state_dict = state_dict["ip_adapter"]
+        ip_layers.load_state_dict(state_dict)
+
+    def set_instant_ip_adapter_scale(self, scale):
+        unet = getattr(self, self.unet_name) if not hasattr(self, "unet") else self.unet
+        for attn_processor in unet.attn_processors.values():
+            if isinstance(attn_processor, IPAttnProcessor):
+                attn_processor.scale = scale
+
+    def _encode_instantid_prompt_image_emb(self, prompt_image_emb, device, dtype, do_classifier_free_guidance):
+        if isinstance(prompt_image_emb, torch.Tensor):
+            prompt_image_emb = prompt_image_emb.clone().detach()
+        else:
+            prompt_image_emb = torch.tensor(prompt_image_emb)
+
+        prompt_image_emb = prompt_image_emb.to(device=device, dtype=dtype)
+        prompt_image_emb = prompt_image_emb.reshape([1, -1, self.image_proj_model_in_features])
+
+        if do_classifier_free_guidance:
+            prompt_image_emb = torch.cat([torch.zeros_like(prompt_image_emb), prompt_image_emb], dim=0)
+        else:
+            prompt_image_emb = torch.cat([prompt_image_emb], dim=0)
+
+        prompt_image_emb = self.image_proj_model(prompt_image_emb)
+        return prompt_image_emb
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt: Union[str, List[str]] = None,
+        prompt_2: Optional[Union[str, List[str]]] = None,
+        num_frames: int = 16,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: int = 50,
+        timesteps: List[int] = None,
+        sigmas: List[float] = None,
+        denoising_end: Optional[float] = None,
+        guidance_scale: float = 5.0,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        negative_prompt_2: Optional[Union[str, List[str]]] = None,
+        num_videos_per_prompt: Optional[int] = 1,
+        eta: float = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        ip_adapter_image: Optional[PipelineImageInput] = None,
+        ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None,
+        instant_id_image_embeds: Optional[List[torch.Tensor]] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        guidance_rescale: float = 0.0,
+        original_size: Optional[Tuple[int, int]] = None,
+        crops_coords_top_left: Tuple[int, int] = (0, 0),
+        target_size: Optional[Tuple[int, int]] = None,
+        negative_original_size: Optional[Tuple[int, int]] = None,
+        negative_crops_coords_top_left: Tuple[int, int] = (0, 0),
+        negative_target_size: Optional[Tuple[int, int]] = None,
+        clip_skip: Optional[int] = None,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
+        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        # Added parameters (for PhotoMaker)
+        input_id_images: PipelineImageInput = None,
+        start_merge_step: int = 0, # TODO: change to `style_strength_ratio` in the future
+        class_tokens_mask: Optional[torch.LongTensor] = None,
+        prompt_embeds_text_only: Optional[torch.FloatTensor] = None,
+        pooled_prompt_embeds_text_only: Optional[torch.FloatTensor] = None,
+        use_clipl_embed: Optional[bool] = False,
+    ):
+        r"""
+        Function invoked when calling the pipeline for generation.
+        Only the parameters introduced by PhotoMaker are discussed here. 
+        For explanations of the previous parameters in StableDiffusionXLPipeline, please refer to https://github.com/huggingface/diffusers/blob/v0.25.0/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py
+
+        Args:
+            input_id_images (`PipelineImageInput`, *optional*): 
+                Input ID Image to work with PhotoMaker.
+            class_tokens_mask (`torch.LongTensor`, *optional*):
+                Pre-generated class token. When the `prompt_embeds` parameter is provided in advance, it is necessary to prepare the `class_tokens_mask` beforehand for marking out the position of class word.
+            prompt_embeds_text_only (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+                provided, text embeddings will be generated from `prompt` input argument.
+            pooled_prompt_embeds_text_only (`torch.FloatTensor`, *optional*):
+                Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
+                If not provided, pooled text embeddings will be generated from `prompt` input argument.
+
+        Returns:
+            [`~pipelines.stable_diffusion_xl.StableDiffusionXLPipelineOutput`] or `tuple`:
+            [`~pipelines.stable_diffusion_xl.StableDiffusionXLPipelineOutput`] if `return_dict` is True, otherwise a
+            `tuple`. When returning a tuple, the first element is a list with the generated images.
+        """
+        # 0. Default height and width to unet
+        height = height or self.default_sample_size * self.vae_scale_factor
+        width = width or self.default_sample_size * self.vae_scale_factor
+
+        original_size = original_size or (height, width)
+        target_size = target_size or (height, width)
+
+        # 1. Check inputs. Raise error if not correct
+        self.check_inputs(
+            prompt,
+            prompt_2,
+            height,
+            width,
+            negative_prompt,
+            negative_prompt_2,
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+            callback_on_step_end_tensor_inputs,
+        )
+
+        self._guidance_scale = guidance_scale
+        self._guidance_rescale = guidance_rescale
+        self._clip_skip = clip_skip
+        self._cross_attention_kwargs = cross_attention_kwargs
+        self._denoising_end = denoising_end
+        self._interrupt = False 
+
+        #        
+        if prompt_embeds is not None and class_tokens_mask is None:
+            raise ValueError(
+                "If `prompt_embeds` are provided, `class_tokens_mask` also have to be passed. Make sure to generate `class_tokens_mask` from the same tokenizer that was used to generate `prompt_embeds`."
+            )
+        # check the input id images
+        if input_id_images is None:
+            raise ValueError(
+                "Provide `input_id_images`. Cannot leave `input_id_images` undefined for PhotoMaker pipeline."
+            )
+        if not isinstance(input_id_images, list):
+            input_id_images = [input_id_images]
+
+        # 2. Define call parameters
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        device = self._execution_device
+
+        # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+        # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+        # corresponds to doing no classifier free guidance.
+        do_classifier_free_guidance = guidance_scale >= 1.0
+
+        assert do_classifier_free_guidance
+
+        # 3. Encode input prompt
+        lora_scale = (
+            self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
+        )
+        num_id_images = len(input_id_images)
+        
+        (
+            prompt_embeds,
+            pooled_prompt_embeds,
+            class_tokens_mask,
+        ) = self.encode_prompt_with_trigger_word(
+            prompt=prompt,
+            prompt_2=prompt_2,
+            device=device,
+            num_id_images=num_id_images,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            class_tokens_mask=class_tokens_mask,
+        )
+        
+        # 4. Encode input prompt without the trigger word for delayed conditioning
+        # encode, remove trigger word token, then decode
+        tokens_text_only = self.tokenizer.encode(prompt, add_special_tokens=False)
+        trigger_word_token = self.tokenizer.convert_tokens_to_ids(self.trigger_word)
+        tokens_text_only.remove(trigger_word_token)
+        prompt_text_only = self.tokenizer.decode(tokens_text_only, add_special_tokens=False)
+        (
+            prompt_embeds_text_only,
+            negative_prompt_embeds,
+            pooled_prompt_embeds_text_only, # TODO: replace the pooled_prompt_embeds with text only prompt
+            negative_pooled_prompt_embeds,
+        ) = self.encode_prompt(
+            prompt=prompt_text_only,
+            prompt_2=prompt_2,
+            device=device,
+            num_videos_per_prompt=num_videos_per_prompt,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            negative_prompt=negative_prompt,
+            negative_prompt_2=negative_prompt_2,
+            prompt_embeds=prompt_embeds_text_only,
+            negative_prompt_embeds=negative_prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds_text_only,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            lora_scale=lora_scale,
+            clip_skip=self.clip_skip,
+        )
+        # Instant ID image embeddings
+        if instant_id_image_embeds is not None:
+            prompt_image_emb = self._encode_instantid_prompt_image_emb(
+                instant_id_image_embeds, device, self.unet.dtype, self.do_classifier_free_guidance
+            )
+            bs_embed, seq_len, _ = prompt_image_emb.shape
+            prompt_image_emb = prompt_image_emb.repeat(1, num_videos_per_prompt, 1)
+            prompt_image_emb = prompt_image_emb.view(bs_embed * num_videos_per_prompt, seq_len, -1)
+        # 5. Prepare the input ID images
+        dtype = next(self.id_encoder.parameters()).dtype
+        if not isinstance(input_id_images[0], torch.Tensor):
+            id_pixel_values = self.id_image_processor(input_id_images, return_tensors="pt").pixel_values
+
+        id_pixel_values = id_pixel_values.unsqueeze(0).to(device=device, dtype=dtype) # TODO: multiple prompts
+
+        # 6. Get the update text embedding with the stacked ID embedding
+        prompt_embeds, _ip_adapter_image_embeds = self.id_encoder(id_pixel_values, prompt_embeds, class_tokens_mask)
+        
+        bs_embed, seq_len, _ = prompt_embeds.shape
+        # duplicate text embeddings for each generat ion per prompt, using mps friendly method
+        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_videos_per_prompt, seq_len, -1)
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_videos_per_prompt).view(
+            bs_embed * num_videos_per_prompt, -1
+        )
+
+        # 7. Prepare timesteps
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler, num_inference_steps, device, timesteps, sigmas
+        )
+
+        # 8. Prepare latent variables
+        num_channels_latents = self.unet.config.in_channels
+        latents = self.prepare_latents(
+            batch_size * num_videos_per_prompt,
+            num_channels_latents,
+            num_frames,
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            generator,
+            latents,
+        )
+
+        # 9. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        # 10. Prepare added time ids & embeddings
+        add_text_embeds = pooled_prompt_embeds
+        if self.text_encoder_2 is None:
+            text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
+        else:
+            text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
+
+        add_time_ids = self._get_add_time_ids(
+            original_size,
+            crops_coords_top_left,
+            target_size,
+            dtype=prompt_embeds.dtype,
+            text_encoder_projection_dim=text_encoder_projection_dim,
+        )
+        # if negative_original_size is not None and negative_target_size is not None:
+        #     negative_add_time_ids = self._get_add_time_ids(
+        #         negative_original_size,
+        #         negative_crops_coords_top_left,
+        #         negative_target_size,
+        #         dtype=prompt_embeds.dtype,
+        #         text_encoder_projection_dim=text_encoder_projection_dim,
+        #     )
+        # else:
+        #     negative_add_time_ids = add_time_ids
+
+        # if do_classifier_free_guidance:
+        #     prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        #     add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+        #     add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
+
+        # prompt_embeds = prompt_embeds.to(device)
+        # add_text_embeds = add_text_embeds.to(device)
+        add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0)
+
+        add_time_ids = add_time_ids.to(device).repeat(batch_size * num_videos_per_prompt, 1)
+
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            if use_clipl_embed:
+                ip_adapter_image_embeds = _ip_adapter_image_embeds[:,0,:,:].repeat_interleave(num_videos_per_prompt, dim=0)
+                uncond_ip_adapter_image_embeds = torch.zeros_like(ip_adapter_image_embeds)
+                ip_adapter_image_embeds = [torch.cat([uncond_ip_adapter_image_embeds, ip_adapter_image_embeds], dim=0)]
+            image_embeds = self.prepare_ip_adapter_image_embeds(
+                ip_adapter_image,
+                ip_adapter_image_embeds,
+                device,
+                batch_size * num_videos_per_prompt,
+                do_classifier_free_guidance,
+            )
+
+        # 7.1 Apply denoising_end
+        if (
+            self.denoising_end is not None
+            and isinstance(self.denoising_end, float)
+            and self.denoising_end > 0
+            and self.denoising_end < 1
+        ):
+            discrete_timestep_cutoff = int(
+                round(
+                    self.scheduler.config.num_train_timesteps
+                    - (self.denoising_end * self.scheduler.config.num_train_timesteps)
+                )
+            )
+            num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
+            timesteps = timesteps[:num_inference_steps]
+
+        # 8. Optionally get Guidance Scale Embedding
+        timestep_cond = None
+        if self.unet.config.time_cond_proj_dim is not None:
+            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_videos_per_prompt)
+            timestep_cond = self.get_guidance_scale_embedding(
+                guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
+            ).to(device=device, dtype=latents.dtype)
+
+        num_free_init_iters = self._free_init_num_iters if self.free_init_enabled else 1
+        for free_init_iter in range(num_free_init_iters):
+            if self.free_init_enabled:
+                latents, timesteps = self._apply_free_init(
+                    latents, free_init_iter, num_inference_steps, device, latents.dtype, generator
+                )
+
+            self._num_timesteps = len(timesteps)
+        
+
+        # 11. Denoising loop
+        with self.progress_bar(total=self._num_timesteps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                if self.interrupt:
+                    continue
+
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                if i <= start_merge_step:
+                    current_prompt_embeds = torch.cat(
+                        [negative_prompt_embeds, prompt_embeds_text_only], dim=0
+                    )
+                    add_text_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds_text_only], dim=0)
+                else:
+                    current_prompt_embeds = torch.cat(
+                        [negative_prompt_embeds, prompt_embeds], dim=0
+                    )
+                    add_text_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+                # predict the noise residual
+                added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+                if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+                    added_cond_kwargs["image_embeds"] = image_embeds
+                if instant_id_image_embeds is not None:
+                    current_prompt_embeds = torch.cat([torch.cat(
+                        [negative_prompt_embeds, prompt_embeds], dim=0), prompt_image_emb], dim=1)
+                noise_pred = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=current_prompt_embeds,
+                    timestep_cond=timestep_cond,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,
+                )[0]
+
+                # perform guidance
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                if do_classifier_free_guidance and guidance_rescale > 0.0:
+                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+
+                if callback_on_step_end is not None:
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
+                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                    latents = callback_outputs.pop("latents", latents)
+                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    add_text_embeds = callback_outputs.pop("add_text_embeds", add_text_embeds)
+                    negative_pooled_prompt_embeds = callback_outputs.pop(
+                            "negative_pooled_prompt_embeds", negative_pooled_prompt_embeds
+                        )
+                    add_time_ids = callback_outputs.pop("add_time_ids", add_time_ids)
+                    negative_add_time_ids = callback_outputs.pop("negative_add_time_ids", negative_add_time_ids)              
+                progress_bar.update()
+
+        # make sure the VAE is in float32 mode, as it overflows in float16
+        if self.vae.dtype == torch.float16 and self.vae.config.force_upcast:
+            self.upcast_vae()
+            latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
+
+        # 10. Post processing
+        if output_type == "latent":
+            video = latents
+        else:
+            video_tensor = self.decode_latents(latents)
+            video = self.video_processor.postprocess_video(video=video_tensor, output_type=output_type)
+        needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
+        # cast back to fp16 if needed
+        if needs_upcasting:
+            self.vae.to(dtype=torch.float16)
+
+        # 11. Offload all models
+        self.maybe_free_model_hooks()
+
+        if not return_dict:
+            return (video,)
+
+        return AnimateDiffPipelineOutput(frames=video)
