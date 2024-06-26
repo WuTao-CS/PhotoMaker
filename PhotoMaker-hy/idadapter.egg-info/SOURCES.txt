@@ -1,0 +1,12 @@
+setup.py
+idadapter/__init__.py
+idadapter/data_sdxl_multiembed.py
+idadapter/model_sdxl_multiembed.py
+idadapter/pipeline_sdxl.py
+idadapter/train_sdxl_lora.py
+idadapter/transforms.py
+idadapter/utils.py
+idadapter.egg-info/PKG-INFO
+idadapter.egg-info/SOURCES.txt
+idadapter.egg-info/dependency_links.txt
+idadapter.egg-info/top_level.txt

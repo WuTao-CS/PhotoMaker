@@ -4,16 +4,21 @@ import random
 import os
 from PIL import Image
 
-import cv2
+
 from diffusers.utils import load_image
 from diffusers import EulerDiscreteScheduler, DDIMScheduler
 from huggingface_hub import hf_hub_download
 from diffusers import DiffusionPipeline, AnimateDiffPipeline, MotionAdapter, DDIMScheduler,AnimateDiffSDXLPipeline
 from diffusers.utils import export_to_gif, load_image
 import argparse
-from insightface.app import FaceAnalysis
 from transformers import CLIPVisionModelWithProjection
+import cv2
 
+# gloal variable and function
+def isimage(path):
+    if 'png' in path.lower() or 'jpg' in path.lower() or 'jpeg' in path.lower():
+        return True
+    
 def extract_face_features(image_lst: list, input_size=(640, 640)):
     # Extract Face features using insightface
     ref_images = []
@@ -29,18 +34,24 @@ def extract_face_features(image_lst: list, input_size=(640, 640)):
             continue
         image = torch.from_numpy(faces[0].normed_embedding)
         ref_images.append(image.unsqueeze(0))
-    ref_images = torch.stack(ref_images, dim=0).unsqueeze(0)
+    if len(ref_images)==0:
+        return [None]
+    else:
+        ref_images = torch.stack(ref_images, dim=0).unsqueeze(0)
 
     return ref_images
-# gloal variable and function
+
+
 def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
-    parser.add_argument("-p", "--prompt", type=str, default="./person.txt", help="prompt")
-    parser.add_argument("-i", "--image", type=str, default='./datasets/lecun', help="image prompt dir path")
-    parser.add_argument("--name", type=str, default='lecun', help="name")
-    parser.add_argument("-w", "--wight_adapter", type=str, default="ip-adapter-plus_sdxl_vit-h.bin", help="ip adapter weight name")
-    parser.add_argument("--scale", type=float, default=0.6, help="scale")
+    parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
+    parser.add_argument("-o", "--output", type=str, default='photomaker_adapter', help="output name")
+    parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
+    parser.add_argument("--multi_ip_adapter", default=False, action='store_true')
+    parser.add_argument("--clip_h", default=False, action='store_true')
+    parser.add_argument("--index", type=int, default=1)
+    parser.add_argument("--skip", default=True, action='store_false')
     return parser
 
 def load_prompts(prompt_file):
@@ -53,20 +64,12 @@ def load_prompts(prompt_file):
         f.close()
     return prompt_list
 
-def isimage(path):
-    if 'png' in path.lower() or 'jpg' in path.lower() or 'jpeg' in path.lower():
-        return True
-    else:
-        return False
     
 parser = get_parser()
 args = parser.parse_args()
-base_model_path = './pretrain_model/RealVisXL_V3.0'
+base_model_path = './pretrain_model/RealVisXL_V4.0'
 device = "cuda"
 save_path = "./outputs"
-image_encoder_path = "./pretrain_model/CLIP-ViT-H-14-laion2B-s32B-b79K"
-image_encoder = CLIPVisionModelWithProjection.from_pretrained(image_encoder_path, torch_dtype=torch.float16)
-
 adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-sdxl-beta")
 scheduler = DDIMScheduler.from_pretrained(
     base_model_path,
@@ -76,56 +79,99 @@ scheduler = DDIMScheduler.from_pretrained(
     beta_schedule="linear",
     steps_offset=1,
 )
-pipe = AnimateDiffSDXLPipeline.from_pretrained(
-    base_model_path,
-    motion_adapter=adapter,
-    scheduler=scheduler,
-    image_encoder=image_encoder,
-    torch_dtype=torch.float16,
-).to("cuda")
+if args.clip_h:
+    image_encoder_path = "./pretrain_model/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    image_encoder = CLIPVisionModelWithProjection.from_pretrained(image_encoder_path, torch_dtype=torch.float16)
+    pipe = AnimateDiffSDXLPipeline.from_pretrained(
+        base_model_path,
+        motion_adapter=adapter,
+        scheduler=scheduler,
+        torch_dtype=torch.float16,
+        image_encoder=image_encoder,
+        variant="fp16",
+    ).to("cuda")
+else:
+    pipe = AnimateDiffSDXLPipeline.from_pretrained(
+        base_model_path,
+        motion_adapter=adapter,
+        scheduler=scheduler,
+        torch_dtype=torch.float16,
+    ).to("cuda")
+
+
 
 
 # pipe.fuse_lora()
-pipe.load_ip_adapter("pretrain_model/IP-Adapter", subfolder="sdxl_models", weight_name=args.wight_adapter,image_encoder_folder=None)
-pipe.set_ip_adapter_scale(0.6)  
+if args.clip_h:
+    pipe.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid-portrait_sdxl.bin"], image_encoder_folder=None)
+else:
+    pipe.load_ip_adapter("./pretrain_model/IP-Adapter-FaceID/", subfolder=None, weight_name="ip-adapter-faceid-portrait_sdxl.bin", image_encoder_folder=None)
+pipe.set_ip_adapter_scale(0.8)  
 #pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 #pipe.fuse_lora()
+pipe.enable_model_cpu_offload()
+print("over")
 
-
-# pipe.set_adapters(["photomaker"], adapter_weights=[1.0])
-# define and show the input ID images
-input_folder_name = args.image
-image_basename_list =[base_name for base_name in os.listdir(args.image) if isimage(base_name)]
+input_folder_name = 'datasets/Face_data'
+image_basename_list =[base_name for base_name in os.listdir(input_folder_name) if isimage(base_name)]
 image_path_list = sorted([os.path.join(input_folder_name, basename) for basename in image_basename_list])
-input_id_images = []
+
+per_devie_num = len(image_path_list)/4
+
+start = int((args.index-1)*per_devie_num)
+end = int(args.index*per_devie_num)
+image_path_list=image_path_list[start:end]
+
+input_id_images=[]
 for image_path in image_path_list:
     input_id_images.append(load_image(image_path))
 
-# face_id_embeds = extract_face_features(input_id_images)[0]
-# neg_face_id_embeds = torch.zeros_like(face_id_embeds)
-# id_embeds = torch.cat([neg_face_id_embeds, face_id_embeds], dim=0).to(dtype=torch.float16, device="cuda")
-## Note that the trigger word `img` must follow the class word for personalization
-prompts = load_prompts(args.prompt)
-negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
+for image_path,input_id_image in zip(image_path_list, input_id_images):
+    input_id_images = [input_id_image]
+    dir_name = os.path.basename(image_path).split('.')[0]
+    if args.skip and os.path.exists("outputs/{}".format(dir_name)):
+        print("skip ", dir_name)
+        continue
+    ## Note that the trigger word `img` must follow the class word for personalization
+    prompts = load_prompts(args.prompt)
+    negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
 
-## Parameter setting
-num_steps = 20
-pipe.enable_vae_slicing()
-pipe.enable_vae_tiling()
-seed_list = args.seed
-for prompt in prompts:
-    for seed in seed_list:
-        generator = torch.Generator(device=device).manual_seed(seed)
-        frames = pipe(
-            prompt=prompt,
-            num_frames=16,
-            guidance_scale=8,
-            ip_adapter_image=input_id_images[0],
-            negative_prompt=negative_prompt,
-            num_videos_per_prompt=1,
-            num_inference_steps=num_steps,
-            generator=generator,
-        ).frames[0]
-        os.makedirs("outputs/{}".format(args.name), exist_ok=True)
-        export_to_gif(frames, "outputs/{}/{}_{}_seed_{}.gif".format(args.name, os.path.basename(args.wight_adapter) , prompt.replace(' ','_'), seed))
-# export_to_gif(frames, "visual_animate_{}_{}.gif".format(text.replace(' ','_'), int(args.scale*10)))
+    face_id_embeds = extract_face_features(input_id_images)[0]
+    if face_id_embeds is None:
+        continue
+    neg_face_id_embeds = torch.zeros_like(face_id_embeds)
+    id_embeds = torch.cat([neg_face_id_embeds, face_id_embeds], dim=0).to(dtype=torch.float16, device="cuda")
+    # id_embeds = face_id_embeds
+
+    if args.multi_ip_adapter:
+        clip_embeds = pipe.prepare_ip_adapter_image_embeds([input_id_images[0],input_id_images[0]], None, torch.device("cuda"), 1, True)[0]
+        
+    ## Parameter setting
+    num_steps = args.num_steps
+    style_strength_ratio = 20
+    start_merge_step = int(float(style_strength_ratio) / 100 * num_steps)
+    if start_merge_step > 30:
+        start_merge_step = 30
+
+    pipe.enable_vae_slicing()
+    pipe.enable_vae_tiling()
+    # print(input_id_images[0] if args.ip_adapter else None)
+    seed_list = args.seed
+
+    for prompt in prompts:
+        for seed in seed_list:
+            generator = torch.Generator(device=device).manual_seed(seed)
+            frames = pipe(
+                prompt=prompt,
+                num_frames=16,
+                guidance_scale=8,
+                input_id_images=input_id_images,
+                negative_prompt=negative_prompt,
+                ip_adapter_image_embeds=[clip_embeds, id_embeds],
+                num_videos_per_prompt=1,
+                num_inference_steps=num_steps,
+                start_merge_step=start_merge_step,
+                generator=generator,
+            ).frames[0]
+            os.makedirs("outputs/{}".format(dir_name), exist_ok=True)
+            export_to_gif(frames, "outputs/{}/{}_{}_seed_{}.gif".format(dir_name, args.output, prompt.replace(' ','_'),seed))
