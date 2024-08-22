@@ -8,3 +8,6 @@ __pycache__/
 *.safetensors
 datasets/*
 pretrain_model/*
+examples/*
+checkpoints*
+*.zip

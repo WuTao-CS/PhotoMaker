@@ -1,0 +1,12 @@
+texts_dirs:
+  root: /mnt/nfs/data/datasets/CeleV-Text/texts/
+  details: face40_details_new/
+  additional:
+    action: action_dur/
+    emotion: emotion/
+    light_direction: light_dir/
+    light_intensity: light_intensity/
+    light_temp: light_color_temp/
+videos_dirs:
+  root: /mnt/nfs/data/datasets/CeleV-Text/celebvtext_6
+

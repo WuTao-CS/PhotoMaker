@@ -8,15 +8,13 @@ from PIL import Image
 from diffusers.utils import load_image
 from diffusers import EulerDiscreteScheduler, DDIMScheduler
 from huggingface_hub import hf_hub_download
-
-from photomaker import PhotoMakerAnimateDiffXLPipline
-from diffusers import MotionAdapter, DDIMScheduler
+from diffusers import DiffusionPipeline, AnimateDiffPipeline, MotionAdapter, DDIMScheduler,AnimateDiffSDXLPipeline
 from diffusers.utils import export_to_gif, load_image
-from insightface.app import FaceAnalysis
+import argparse
 from transformers import CLIPVisionModelWithProjection
 import cv2
+
 # gloal variable and function
-import argparse
 def isimage(path):
     if 'png' in path.lower() or 'jpg' in path.lower() or 'jpeg' in path.lower():
         return True
@@ -47,8 +45,7 @@ def extract_face_features(image_lst: list, input_size=(640, 640)):
 def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
-    parser.add_argument("-p", "--prompt", type=str, default='person.txt', help="prompt file path")
-    parser.add_argument("-i", "--image", type=str, help="image")
+    parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
     parser.add_argument("-o", "--output", type=str, default='photomaker_adapter', help="output name")
     parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
     parser.add_argument("--multi_ip_adapter", default=False, action='store_true')
@@ -67,14 +64,13 @@ def load_prompts(prompt_file):
         f.close()
     return prompt_list
 
+    
 parser = get_parser()
 args = parser.parse_args()
 base_model_path = './pretrain_model/RealVisXL_V4.0'
 device = "cuda"
 save_path = "./outputs"
 adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-sdxl-beta")
-
-
 scheduler = DDIMScheduler.from_pretrained(
     base_model_path,
     subfolder="scheduler",
@@ -83,11 +79,10 @@ scheduler = DDIMScheduler.from_pretrained(
     beta_schedule="linear",
     steps_offset=1,
 )
-
 if args.clip_h:
     image_encoder_path = "./pretrain_model/CLIP-ViT-H-14-laion2B-s32B-b79K"
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(image_encoder_path, torch_dtype=torch.float16)
-    pipe = PhotoMakerAnimateDiffXLPipline.from_pretrained(
+    pipe = AnimateDiffSDXLPipeline.from_pretrained(
         base_model_path,
         motion_adapter=adapter,
         scheduler=scheduler,
@@ -96,36 +91,36 @@ if args.clip_h:
         variant="fp16",
     ).to("cuda")
 else:
-    pipe = PhotoMakerAnimateDiffXLPipline.from_pretrained(
+    pipe = AnimateDiffSDXLPipeline.from_pretrained(
         base_model_path,
         motion_adapter=adapter,
         scheduler=scheduler,
         torch_dtype=torch.float16,
-        variant="fp16",
     ).to("cuda")
 
 
-pipe.load_photomaker_adapter(
-    "./pretrain_model/PhotoMaker",
-    subfolder="",
-    weight_name="photomaker-v1.bin",
-    trigger_word="img"
-)
-pipe.id_encoder.to(device)
 
+
+# pipe.fuse_lora()
 if args.clip_h:
-    pipe.load_ip_adapter(["./pretrain_model/IP-Adapter"], subfolder=["sdxl_models"], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin'], image_encoder_folder=None)
+    pipe.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid-portrait_sdxl.bin"], image_encoder_folder=None)
 else:
     pipe.load_ip_adapter("./pretrain_model/IP-Adapter-FaceID/", subfolder=None, weight_name="ip-adapter-faceid-portrait_sdxl.bin", image_encoder_folder=None)
-
-# pipe.load_ip_adapter("./pretrain_model/IP-Adapter-FaceID/", subfolder=None, weight_name="ip-adapter-faceid_sdxl.bin", image_encoder_folder=None)
-# pretrain_model/IP-Adapter-FaceID/ip-adapter-faceid-portrait_sdxl.bin
-pipe.set_ip_adapter_scale(0.7)  
+pipe.set_ip_adapter_scale(0.8)  
+#pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+#pipe.fuse_lora()
 pipe.enable_model_cpu_offload()
 print("over")
-# define and show the input ID images
 
-image_path_list=[args.image]
+input_folder_name = 'datasets/Face_data'
+image_basename_list =[base_name for base_name in os.listdir(input_folder_name) if isimage(base_name)]
+image_path_list = sorted([os.path.join(input_folder_name, basename) for basename in image_basename_list])
+
+per_devie_num = len(image_path_list)/4
+
+start = int((args.index-1)*per_devie_num)
+end = int(args.index*per_devie_num)
+image_path_list=image_path_list[start:end]
 
 input_id_images=[]
 for image_path in image_path_list:
@@ -140,16 +135,16 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     ## Note that the trigger word `img` must follow the class word for personalization
     prompts = load_prompts(args.prompt)
     negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
+
+    face_id_embeds = extract_face_features(input_id_images)[0]
+    if face_id_embeds is None:
+        continue
+    neg_face_id_embeds = torch.zeros_like(face_id_embeds)
+    id_embeds = torch.cat([neg_face_id_embeds, face_id_embeds], dim=0).to(dtype=torch.float16, device="cuda")
     # id_embeds = face_id_embeds
 
-    if args.clip_h:
-        id_embeds = pipe.prepare_ip_adapter_image_embeds(input_id_images[0], None, torch.device("cuda"), 1, True)[0]
-    else:
-        face_id_embeds = extract_face_features(input_id_images)[0]
-        if face_id_embeds is None:
-            continue
-        neg_face_id_embeds = torch.zeros_like(face_id_embeds)
-        id_embeds = torch.cat([neg_face_id_embeds, face_id_embeds], dim=0).to(dtype=torch.float16, device="cuda")
+    if args.multi_ip_adapter:
+        clip_embeds = pipe.prepare_ip_adapter_image_embeds([input_id_images[0],input_id_images[0]], None, torch.device("cuda"), 1, True)[0]
         
     ## Parameter setting
     num_steps = args.num_steps
@@ -172,7 +167,7 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
                 guidance_scale=8,
                 input_id_images=input_id_images,
                 negative_prompt=negative_prompt,
-                ip_adapter_image_embeds=[id_embeds],
+                ip_adapter_image_embeds=[clip_embeds, id_embeds],
                 num_videos_per_prompt=1,
                 num_inference_steps=num_steps,
                 start_merge_step=start_merge_step,

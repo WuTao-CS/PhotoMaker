@@ -17,6 +17,8 @@ from transformers import CLIPVisionModelWithProjection
 import cv2
 # gloal variable and function
 import argparse
+import os
+# os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 def isimage(path):
     if 'png' in path.lower() or 'jpg' in path.lower() or 'jpeg' in path.lower():
         return True
@@ -123,7 +125,7 @@ pipe.set_ip_adapter_scale([0.7,0.7])
 pipe.enable_model_cpu_offload()
 print("over")
 # define and show the input ID images
-input_folder_name = 'datasets/Face_data'
+input_folder_name = 'datasets/Face_data/00000'
 image_basename_list =[base_name for base_name in os.listdir(input_folder_name) if isimage(base_name)]
 image_path_list = sorted([os.path.join(input_folder_name, basename) for basename in image_basename_list])
 
@@ -140,9 +142,9 @@ for image_path in image_path_list:
 for image_path,input_id_image in zip(image_path_list, input_id_images):
     input_id_images = [input_id_image]
     dir_name = os.path.basename(image_path).split('.')[0]
-    if args.skip and os.path.exists("outputs/{}".format(dir_name)):
-        print("skip ", dir_name)
-        continue
+    # if args.skip and os.path.exists("outputs/{}".format(dir_name)):
+    #     print("skip ", dir_name)
+    #     continue
     ## Note that the trigger word `img` must follow the class word for personalization
     prompts = load_prompts(args.prompt)
     negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"

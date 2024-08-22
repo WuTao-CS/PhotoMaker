@@ -9,7 +9,7 @@ from diffusers.utils import load_image
 from diffusers import EulerDiscreteScheduler, DDIMScheduler
 from huggingface_hub import hf_hub_download
 
-from photomaker import PhotoMakerAnimateDiffXLPipline
+# from photomaker import PhotoMakerAnimateDiffXLPipline
 from diffusers import MotionAdapter, DDIMScheduler
 from diffusers.utils import export_to_gif, load_image
 from insightface.app import FaceAnalysis

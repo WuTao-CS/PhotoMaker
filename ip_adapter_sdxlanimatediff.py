@@ -13,6 +13,7 @@ from diffusers.utils import export_to_gif, load_image
 import argparse
 from transformers import CLIPVisionModelWithProjection
 import cv2
+from insightface.app import FaceAnalysis
 
 # gloal variable and function
 def isimage(path):
@@ -48,10 +49,8 @@ def get_parser(**parser_kwargs):
     parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
     parser.add_argument("-o", "--output", type=str, default='photomaker_adapter', help="output name")
     parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
-    parser.add_argument("--multi_ip_adapter", default=False, action='store_true')
     parser.add_argument("--clip_h", default=False, action='store_true')
     parser.add_argument("--index", type=int, default=1)
-    parser.add_argument("--skip", default=True, action='store_false')
     return parser
 
 def load_prompts(prompt_file):
@@ -103,7 +102,7 @@ else:
 
 # pipe.fuse_lora()
 if args.clip_h:
-    pipe.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid-portrait_sdxl.bin"], image_encoder_folder=None)
+    pipe.load_ip_adapter("./pretrain_model/IP-Adapter", subfolder="sdxl_models", weight_name='ip-adapter-plus-face_sdxl_vit-h.bin', image_encoder_folder=None)
 else:
     pipe.load_ip_adapter("./pretrain_model/IP-Adapter-FaceID/", subfolder=None, weight_name="ip-adapter-faceid-portrait_sdxl.bin", image_encoder_folder=None)
 pipe.set_ip_adapter_scale(0.8)  
@@ -112,11 +111,11 @@ pipe.set_ip_adapter_scale(0.8)
 pipe.enable_model_cpu_offload()
 print("over")
 
-input_folder_name = 'datasets/Face_data'
+input_folder_name = 'datasets/Face_data/00000'
 image_basename_list =[base_name for base_name in os.listdir(input_folder_name) if isimage(base_name)]
 image_path_list = sorted([os.path.join(input_folder_name, basename) for basename in image_basename_list])
-
-per_devie_num = len(image_path_list)/4
+image_path_list = image_path_list[:50]
+per_devie_num = len(image_path_list)/2
 
 start = int((args.index-1)*per_devie_num)
 end = int(args.index*per_devie_num)
@@ -129,9 +128,9 @@ for image_path in image_path_list:
 for image_path,input_id_image in zip(image_path_list, input_id_images):
     input_id_images = [input_id_image]
     dir_name = os.path.basename(image_path).split('.')[0]
-    if args.skip and os.path.exists("outputs/{}".format(dir_name)):
-        print("skip ", dir_name)
-        continue
+    # if args.skip and os.path.exists("outputs/{}".format(dir_name)):
+    #     print("skip ", dir_name)
+    #     continue
     ## Note that the trigger word `img` must follow the class word for personalization
     prompts = load_prompts(args.prompt)
     negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
@@ -143,7 +142,7 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     id_embeds = torch.cat([neg_face_id_embeds, face_id_embeds], dim=0).to(dtype=torch.float16, device="cuda")
     # id_embeds = face_id_embeds
 
-    if args.multi_ip_adapter:
+    if args.clip_h:
         clip_embeds = pipe.prepare_ip_adapter_image_embeds([input_id_images[0],input_id_images[0]], None, torch.device("cuda"), 1, True)[0]
         
     ## Parameter setting
@@ -161,17 +160,26 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     for prompt in prompts:
         for seed in seed_list:
             generator = torch.Generator(device=device).manual_seed(seed)
-            frames = pipe(
-                prompt=prompt,
-                num_frames=16,
-                guidance_scale=8,
-                input_id_images=input_id_images,
-                negative_prompt=negative_prompt,
-                ip_adapter_image_embeds=[clip_embeds, id_embeds],
-                num_videos_per_prompt=1,
-                num_inference_steps=num_steps,
-                start_merge_step=start_merge_step,
-                generator=generator,
-            ).frames[0]
+            if args.clip_h:
+                frames = pipe(
+                    prompt=prompt,
+                    num_frames=16,
+                    guidance_scale=8,
+                    negative_prompt=negative_prompt,
+                    ip_adapter_image_embeds=[clip_embeds],
+                    num_videos_per_prompt=1,
+                    num_inference_steps=num_steps,
+                    generator=generator,
+                ).frames[0]
+            else:
+                frames = pipe(
+                    prompt=prompt,
+                    num_frames=16,
+                    guidance_scale=8,
+                    negative_prompt=negative_prompt,
+                    ip_adapter_image_embeds=[id_embeds],
+                    num_videos_per_prompt=1,
+                    generator=generator,
+                ).frames[0]
             os.makedirs("outputs/{}".format(dir_name), exist_ok=True)
             export_to_gif(frames, "outputs/{}/{}_{}_seed_{}.gif".format(dir_name, args.output, prompt.replace(' ','_'),seed))
