@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 from safetensors import safe_open
 import torch.nn.functional as F
 from diffusers import AutoencoderKL,MotionAdapter, UNet2DConditionModel, UNetMotionModel
-from diffusers.loaders.lora import StableDiffusionXLLoraLoaderMixin
+from diffusers.loaders import StableDiffusionXLLoraLoaderMixin
 from diffusers.loaders.ip_adapter import IPAdapterMixin
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, CLIPTextModelWithProjection
 # from .attention_processor import MixIPAdapterAttnProcessor2_0
@@ -178,7 +178,8 @@ class PhotoMakerIDEncoder(CLIPVisionModelWithProjection):
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-def calc_mean_std(feat, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor]:
+
+def calc_mean_std(feat, eps: float = 1e-5):
     feat_std = (feat.var(dim=-2, keepdims=True) + eps).sqrt()
     feat_mean = feat.mean(dim=-2, keepdims=True)
     return feat_mean, feat_std
@@ -504,6 +505,14 @@ class CrossAttention(nn.Module):
 #             # remove additional token
 #             out = out[:, n_tokens_to_mask:]
 #         return self.to_out(out)
+def zero_module(module):
+    """
+    Zero out the parameters of a module and return it.
+    """
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
+
 class IDAttentionFusionBlock(nn.Module):
     def __init__(self, hidden_size, num_heads=8, mlp_ratio=4.0,time_ebed_size=1280, num_frame=16, **block_kwargs):
         super().__init__()
@@ -515,13 +524,17 @@ class IDAttentionFusionBlock(nn.Module):
         self.mlp = MLP(in_dim=hidden_size, out_dim=hidden_size, hidden_dim=mlp_hidden_dim, use_residual=False)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(time_ebed_size, 9 * hidden_size, bias=True)
+            zero_module(nn.Linear(time_ebed_size, 6 * hidden_size, bias=True)),
         )
-        
+        self.adaLN_modulation_ratio = nn.Sequential(
+            nn.Linear(time_ebed_size, 3 * hidden_size, bias=True),
+            nn.SiLU(),
+        )
 
     def forward(self, text_feature, clipi_feature, faceid_feature, time_emb):
         time_emb = time_emb.repeat(self.num_frame, 1)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, ratio_face, ratio_clipi, ratio_text = self.adaLN_modulation(time_emb).chunk(9, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(time_emb).chunk(6, dim=1)
+        ratio_face, ratio_clipi, ratio_text = self.adaLN_modulation_ratio(time_emb).chunk(3, dim=1)
         # input_key = adain(clipi_feature,faceid_feature) + 
         id_feature  = ratio_face.unsqueeze(1) *faceid_feature + ratio_clipi.unsqueeze(1) * clipi_feature
         x = text_feature + gate_msa.unsqueeze(1) * self.attn(text_feature, modulate(self.norm1(id_feature), shift_msa, scale_msa))

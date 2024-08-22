@@ -316,8 +316,19 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
     def interrupt(self):
         return self._interrupt
         
-    def set_fusion_model(self):
+    def set_fusion_model(self,unet_path):
+        self.load_photomaker_adapter(
+            "./pretrain_model/PhotoMaker",
+            subfolder="",
+            weight_name="photomaker-v1.bin",
+            trigger_word="img"
+        )
+        self.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid-portrait_sdxl.bin"], image_encoder_folder=None)
         attn_procs = {}
+        with open("/group/40034/jackeywu/code/PhotoMaker/block.txt", "r") as file:
+            # 读取文件内容并存储到列表中
+            string_list = file.readlines()
+        inject_block = [line.strip() for line in string_list]
         for name in self.unet.attn_processors.keys():
             cross_attention_dim = None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
             if name.startswith("mid_block"):
@@ -329,17 +340,31 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
                 block_id = int(name[len("down_blocks.")])
                 hidden_size = self.unet.config.block_out_channels[block_id]
             if cross_attention_dim is None or "motion_modules" in name or "encoder_hid_proj" in name:
-                attn_procs[name] = AttnProcessor2_0()
+                attn_procs[name] = self.unet.attn_processors[name]
             elif "fusion" in name:
                 continue
-            else:
+            elif name.startswith("up_blocks.0") and name in inject_block:
+                print(name)
                 attn_procs[name] = MixIPAdapterAttnProcessor2_0(
                     hidden_size=hidden_size,
                     cross_attention_dim=cross_attention_dim,
                     scale=1.0,
                     num_tokens=self.unet.attn_processors[name].num_tokens,
-                ).to(self.device, dtype=torch.float16)
+                    video_length=16
+                ).to(dtype=torch.float16)
+            elif name.startswith("up_blocks.1"):
+                attn_procs[name] = MixIPAdapterAttnProcessor2_0(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    scale=1.0,
+                    num_tokens=self.unet.attn_processors[name].num_tokens,
+                    video_length=16
+                ).to(dtype=torch.float16)
+            else:
+                attn_procs[name] = self.unet.attn_processors[name]
         self.unet.set_attn_processor(attn_procs)
+        result = self.unet.load_state_dict(torch.load(unet_path,map_location='cpu'), strict=True)
+        print(result)
         return
     @torch.no_grad()
     def __call__(
@@ -441,7 +466,7 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
         self._cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
         self._denoising_end = denoising_end
         self._interrupt = False 
-        self.set_fusion_model()
+        # self.set_fusion_model()
         #        
         if prompt_embeds is not None and class_tokens_mask is None:
             raise ValueError(

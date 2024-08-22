@@ -25,7 +25,7 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, EulerDiscreteScheduler
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
@@ -258,10 +258,16 @@ def parse_args():
         help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
     )
     parser.add_argument(
+        "--resolution",
+        type=int,
+        default=512,
+        help="Resolution of input video",
+    )
+    parser.add_argument(
         "--video_length",
         type=int,
         default=16,
-        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
+        help="Video Length of input video.",
     )
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
@@ -271,7 +277,15 @@ def parse_args():
     parser.add_argument(
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
-
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -283,6 +297,23 @@ def parse_args():
 
     return args
     
+def print_learnable_params(model, optimizer):
+    # 获取优化器
+    cnt = 0
+    print("Learnable parameters: ")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name)
+            cnt+=1
+    print("Total number of learnable parameters: ", cnt)
+    cnt_opt = 0
+    for param_group in optimizer.param_groups:
+        for item in param_group['params']:
+            cnt_opt+=1
+    print("Total number of learnable parameters in optimizer: ", cnt_opt)
+    if cnt_opt!=cnt:
+        print("WARNING!!!!! learnable parameters not correct")
+    return
 
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
@@ -319,11 +350,12 @@ def main(args):
 
     # Load scheduler, tokenizer and models.
     model = MixIDTrainModel.from_pretrained(args.pretrained_model_name_or_path, video_length=args.video_length)
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = EulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     # freeze parameters of models to save more memory TODO
+    model.train()
     model.unet.requires_grad_(False)
     model.freeze_parameters()
-    estimate_zero3_model_states_mem_needs_all_live(model,4)
+    # estimate_zero3_model_states_mem_needs_all_live(model,4)
     # adapter_modules = model.adapter_modules
     # accelerator.register_for_checkpointing(model.adapter_modules)
     if args.with_vae:
@@ -370,7 +402,8 @@ def main(args):
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
-    
+    if args.with_vae:
+        vae = vae.to(accelerator.device, dtype=torch.float32)
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -404,7 +437,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
     
-    train_dataset = CelebVTextDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length)
+    train_dataset = CelebVTextDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution])
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -428,6 +461,8 @@ def main(args):
     )
     if args.with_vae:
         vae = accelerator.prepare(vae)
+
+    print_learnable_params(model, optimizer)
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
@@ -461,8 +496,33 @@ def main(args):
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     global_step = 0
     first_epoch = 0
-    initial_global_step = 0
-    # Potentially load in the weights and states from a previous save
+     # Potentially load in the weights and states from a previous save
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            path = os.path.basename(args.resume_from_checkpoint)
+        else:
+            # Get the most recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            path = dirs[-1] if len(dirs) > 0 else None
+
+        if path is None:
+            accelerator.print(
+                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+            )
+            args.resume_from_checkpoint = None
+            initial_global_step = 0
+        else:
+            accelerator.print(f"Resuming from checkpoint {path}")
+            accelerator.load_state(os.path.join(args.output_dir, path))
+            global_step = int(path.split("-")[1])
+
+            initial_global_step = global_step
+            first_epoch = global_step // num_update_steps_per_epoch
+
+    else:
+        initial_global_step = 0
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=initial_global_step,
@@ -470,6 +530,7 @@ def main(args):
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
     )
+    torch.cuda.empty_cache()
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
@@ -479,7 +540,7 @@ def main(args):
                     latent = vae.encode(rearrange(batch["video"], "b f c h w -> (b f) c h w")).latent_dist.sample()
                     batch["videos"] = rearrange(latent, "(b f) c h w -> b f c h w", f=video_length) * vae.config.scaling_factor
             with accelerator.accumulate(model):
-                outputs = model(batch, noise_scheduler)
+                outputs = model(batch, noise_scheduler, resolution=args.resolution)
                 loss = outputs["denoise_loss"]
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()

@@ -8,13 +8,14 @@ from transformers import PretrainedConfig
 from safetensors import safe_open
 import torch.nn.functional as F
 from diffusers import AutoencoderKL,MotionAdapter, UNet2DConditionModel, UNetMotionModel
-from diffusers.loaders.lora import StableDiffusionXLLoraLoaderMixin
+from diffusers.loaders import StableDiffusionXLLoraLoaderMixin
 from diffusers.loaders.ip_adapter import IPAdapterMixin
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, CLIPTextModelWithProjection
 import itertools
 from diffusers.loaders import AttnProcsLayers
 # from .attention_processor import MixIPAdapterAttnProcessor2_0
 from einops import rearrange, repeat
+from diffusers.utils.torch_utils import randn_tensor
 from diffusers.utils import (
     USE_PEFT_BACKEND,
     _get_model_file,
@@ -362,9 +363,9 @@ class MixIDModel(nn.Module, StableDiffusionXLLoraLoaderMixin,IPAdapterMixin):
         clip_image_embed = batch["clip_image_embed"]
         face_id_embed = batch["face_id_embed"]
 
-        original_size = (1024, 1024)
+        original_size = (512, 512)
         crops_coords_top_left = (0, 0)
-        target_size = (1024, 1024)
+        target_size = (512, 512)
         if torch.any(torch.isnan(latents)):
             print("NaN found in latents, replacing with zeros")
             latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
@@ -440,8 +441,8 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
     def __init__(self, unet, video_length=16):
         super().__init__()
         self.unet = unet
-        self.adapter_modules = None
         self.video_length = video_length
+        self.hf_device_map = "auto"
         self.init_model()
     
     def from_pretrained(pretrained_model_name_or_path, video_length=16):
@@ -514,10 +515,11 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
 
         # load lora into models
         print(f"Loading PhotoMaker components [1] lora_weights from [{pretrained_model_name_or_path_or_dict}]")
-        self.unet.load_attn_procs(state_dict["lora_weights"], adapter_name="photomaker")
-        # self.load_lora_weights(state_dict["lora_weights"], adapter_name="photomaker")
+        # self.unet.load_attn_procs(state_dict["lora_weights"], adapter_name="photomaker")
+        self.load_lora_weights(state_dict["lora_weights"], adapter_name="photomaker")
+        del self.hf_device_map
     
-    def init_model(self):
+    def init_model(self, unet_inject_block=None):
         self.load_photomaker_adapter(
             "./pretrain_model/PhotoMaker",
             subfolder="",
@@ -526,6 +528,10 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
         )
         self.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid-portrait_sdxl.bin"], image_encoder_folder=None)
         attn_procs = {}
+        with open("/group/40034/jackeywu/code/PhotoMaker/block.txt", "r") as file:
+            # 读取文件内容并存储到列表中
+            string_list = file.readlines()
+        inject_block = [line.strip() for line in string_list]
         for name in self.unet.attn_processors.keys():
             cross_attention_dim = None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
             if name.startswith("mid_block"):
@@ -537,10 +543,13 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
                 block_id = int(name[len("down_blocks.")])
                 hidden_size = self.unet.config.block_out_channels[block_id]
             if cross_attention_dim is None or "motion_modules" in name or "encoder_hid_proj" in name:
-                attn_procs[name] = AttnProcessor2_0()
-            elif "fusion" in name:
-                continue
-            else:
+                attn_procs[name] = self.unet.attn_processors[name]
+            # elif "fusion" in name:
+            #     print("##############")
+            #     print(name)
+            #     continue
+            elif name.startswith("up_blocks.0") and name in inject_block:
+                print(name)
                 attn_procs[name] = MixIPAdapterAttnProcessor2_0(
                     hidden_size=hidden_size,
                     cross_attention_dim=cross_attention_dim,
@@ -548,14 +557,22 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
                     num_tokens=self.unet.attn_processors[name].num_tokens,
                     video_length=self.video_length
                 ).to(dtype=torch.float16)
+            elif name.startswith("up_blocks.1"):
+                attn_procs[name] = MixIPAdapterAttnProcessor2_0(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    scale=1.0,
+                    num_tokens=self.unet.attn_processors[name].num_tokens,
+                    video_length=self.video_length
+                ).to(dtype=torch.float16)
+            else:
+                attn_procs[name] = self.unet.attn_processors[name]
         self.unet.set_attn_processor(attn_procs)
-        # self.adapter_modules = AttnProcsLayers(self.unet.attn_processors)
-        self.adapter_modules = self.unet.attn_processors.values()
         return
 
     def get_learnable_parameters(self):
         learn_params = []
-        for proc in self.adapter_modules:
+        for proc in self.unet.attn_processors.values():
             if isinstance(proc, (MixIPAdapterAttnProcessor2_0)):
                 learn_params.append(list(proc.fusion.parameters()))
         return list(itertools.chain(*learn_params))
@@ -568,6 +585,7 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
                 parm.requires_grad = False
     # def get_learnable_parameters(self):
     #     return self.adapter_modules.parameters()
+    
     def _get_add_time_ids(
         self, original_size, crops_coords_top_left, target_size, dtype, text_encoder_projection_dim=1280
     ):
@@ -585,17 +603,18 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
 
         add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
         return add_time_ids
-    
-    def forward(self, batch, noise_scheduler):
+
+
+    def forward(self, batch, noise_scheduler,resolution=512):
         latents = batch["video"]
         clip_emb = batch["clip_emb"]
         face_id_embed = batch["faces_id"]
         prompt_embeds = batch["prompt_embeds"]
         pooled_prompt_embeds = batch["pooled_prompt_embeds"]
     
-        original_size = (1024, 1024)
+        original_size = (resolution,resolution)
         crops_coords_top_left = (0, 0)
-        target_size = (1024, 1024)
+        target_size = (resolution,resolution)
         if torch.any(torch.isnan(latents)):
             print("NaN found in latents, replacing with zeros")
             latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
@@ -648,3 +667,9 @@ class MixIDTrainModel(nn.Module,StableDiffusionXLLoraLoaderMixin,IPAdapterMixin)
 
         return_dict = {"denoise_loss": denoise_loss}
         return return_dict
+    
+    # def forward(self, noisy_latents, timesteps, encoder_hidden_states, added_cond_kwargs,cross_attention_kwargs, return_dict=False):
+
+    #     pred = self.unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs,cross_attention_kwargs=cross_attention_kwargs,return_dict=False)[0]
+
+    #     return pred

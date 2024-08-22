@@ -16,11 +16,13 @@ from photomaker.model import PhotoMakerIDEncoder
 from insightface.app import FaceAnalysis
 from photomaker.datasets.celebv_text import CelebVTextProcessDataset
 import json
+# import torch_npu
+# from torch_npu.contrib import transfer_to_npu
 
 def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument("--root", type=str, default='./datasets/CeleV-Text', help="data path")
-    parser.add_argument("--save_path", type=str, default='/data1/wutao', help="data path")
+    parser.add_argument("--save_path", type=str, default='/group/40007/public_datasets/CeleV-Text', help="data path")
     parser.add_argument("--pretrained_model_name_or_path", type=str, default='./pretrain_model/RealVisXL_V4.0', help="pretrained model path")
     parser.add_argument("--phase",type=int,default=0)
     parser.add_argument("--total",type=int,default=8)
@@ -313,18 +315,14 @@ if __name__ == "__main__":
     annotator.to("cuda")
     print(args.phase)
     data = CelebVTextProcessDataset(root=args.root,load_all_frames=False,phase=args.phase,total=args.total)
-    data_loader = torch.utils.data.DataLoader(data, batch_size=1, shuffle=False,num_workers=4)
+    data_loader = torch.utils.data.DataLoader(data, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
     all_data = []
     for batch in tqdm(data_loader):
         if batch == {}:
             continue
         ref_data = None
         if os.path.exists(f"{args.save_path}/processed/{batch['name'][0]}.pt"):
-            ref_data = torch.load(f"{args.save_path}/processed/{batch['name'][0]}.pt")
-            if "prompt_embeds_trigger" not in ref_data:
-                ref_data = None
-            elif ref_data["prompt_embeds_trigger"].shape[0] == 16:
-                ref_data = None
+            continue
         with torch.no_grad():
             output = annotator(batch,ref_data)
         if output == {}:
@@ -340,4 +338,3 @@ if __name__ == "__main__":
         json.dump(all_data, f, indent=4)
     print("ok")
 
-    

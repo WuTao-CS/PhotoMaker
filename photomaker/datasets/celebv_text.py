@@ -175,12 +175,16 @@ class CelebVTextProcessDataset(torch.utils.data.Dataset):
 
     
 class CelebVTextDataset(torch.utils.data.Dataset):
-    def __init__(self, root: str, video_length = 16, resolution = [1024,1024], frame_stride=8, spatial_transform_type="resize_center_crop", num_ref_frames=16, get_latent_from_video=False, fixed_fps=None, prompt_trigger=True):
+    def __init__(self, root: str, video_length = 16, resolution = [512,512], frame_stride=8, spatial_transform_type="resize_center_crop", num_ref_frames=16, get_latent_from_video=False, fixed_fps=None, prompt_trigger=True, with_scaling_factor=True):
         self.root = root
         self.video_length = video_length
         self.resolution = resolution
-        with open(os.path.join(self.root, "processed.json"), 'r') as file:
-            self.all_data = json.load(file)
+        if self.resolution[0]==512:
+            with open(os.path.join(self.root, "processed_512.json"), 'r') as file:
+                self.all_data = json.load(file)
+        else:
+            with open(os.path.join(self.root, "processed.json"), 'r') as file:
+                self.all_data = json.load(file)
         self.spatial_transform_type = spatial_transform_type
         self.spatial_transform = make_spatial_transformations(self.resolution, type=self.spatial_transform_type) \
             if self.spatial_transform_type is not None else None
@@ -189,6 +193,8 @@ class CelebVTextDataset(torch.utils.data.Dataset):
         self.get_latent_from_video = get_latent_from_video
         self.frame_stride = frame_stride
         self.prompt_trigger = prompt_trigger
+        self.with_scaling_factor =with_scaling_factor
+        
 
     def __len__(self) -> int:
         return len(self.all_data)
@@ -198,8 +204,11 @@ class CelebVTextDataset(torch.utils.data.Dataset):
         data = self.all_data[index]
         prompt = data["prompt"]
         prompt_trigger = data["prompt_trigger"]
-        process_data_path = data["path"]
-        process_data = torch.load(process_data_path)
+        if self.resolution[0]==512:
+            process_data_path = data["path"].replace("processed_512","processed")
+        else:
+            process_data_path = data["path"]
+        process_data = torch.load(process_data_path, map_location='cpu')
         
         if self.get_latent_from_video:
             base_name = os.path.basename(process_data_path).split(".")[0]
@@ -227,7 +236,10 @@ class CelebVTextDataset(torch.utils.data.Dataset):
                 assert(frames.shape[0] == self.video_length),f'{len(frames)}, self.video_length={self.video_length}'
                 frames = torch.tensor(frames.asnumpy()).permute(0,3,1,2).float() # [t,h,w,c] -> [t,c,h,w]
         else:
-            frames = process_data["latent"][:,:self.video_length,:,:]
+            if self.resolution[0]==512:
+                frames = torch.load(data["path"], map_location='cpu')["latent"][:,:self.video_length,:,:]
+            else:
+                frames = process_data["latent"][:,:self.video_length,:,:]
         idx = random.randint(0, self.num_ref_frames-1)
         faces_id_idx = random.randint(0, process_data["face_ids"].shape[0]-1)
         faces_id = process_data["face_ids"][faces_id_idx]
@@ -239,6 +251,8 @@ class CelebVTextDataset(torch.utils.data.Dataset):
             prompt_emb = process_data["prompt_emb"]
             pooled_prompt_emb = process_data["pooled_prompt_emb"]
         class_token_mask = process_data["class_tokens_mask"]
+        if self.with_scaling_factor:
+            frames = frames * 0.13025
 
         return {"video":frames, "clip_emb":clip_emb, "prompt_emb":prompt_emb, "pooled_prompt_emb":pooled_prompt_emb, "faces_id":faces_id, "class_token_mask":class_token_mask, "prompt":prompt, "prompt_trigger":prompt_trigger}
         
