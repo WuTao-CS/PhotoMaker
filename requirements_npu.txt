@@ -1,0 +1,17 @@
+torch
+diffusers==0.28.2
+transformers==4.44.2
+spaces
+numpy
+accelerate
+safetensors
+omegaconf
+insightface
+peft==0.12.0
+gradio
+einops
+decord
+tensorboard
+numpy==1.24.4
+deepspeed
+onnxruntime

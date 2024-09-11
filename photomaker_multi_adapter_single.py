@@ -55,6 +55,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument("--clip_h", default=False, action='store_true')
     parser.add_argument("--index", type=int, default=1)
     parser.add_argument("--skip", default=True, action='store_false')
+    parser.add_argument("--size",type=int, default=512, help="size of image")
     return parser
 
 def load_prompts(prompt_file):
@@ -72,7 +73,7 @@ args = parser.parse_args()
 base_model_path = './pretrain_model/RealVisXL_V4.0'
 device = "cuda"
 save_path = "./outputs"
-adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-sdxl-beta")
+adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-sdxl-beta")
 
 
 scheduler = DDIMScheduler.from_pretrained(
@@ -120,8 +121,7 @@ else:
     pipe.load_ip_adapter("./pretrain_model/IP-Adapter-FaceID/", subfolder=None, weight_name="ip-adapter-faceid-portrait_sdxl.bin", image_encoder_folder=None)
 # pipe.load_ip_adapter("./pretrain_model/IP-Adapter-FaceID/", subfolder=None, weight_name="ip-adapter-faceid_sdxl.bin", image_encoder_folder=None)
 # pretrain_model/IP-Adapter-FaceID/ip-adapter-faceid-portrait_sdxl.bin
-pipe.set_ip_adapter_scale([0.7,0.7])  
-pipe.enable_model_cpu_offload()
+# pipe.set_ip_adapter_scale([0.7,0.7])  
 print("over")
 # define and show the input ID images
 
@@ -134,9 +134,9 @@ for image_path in image_path_list:
 for image_path,input_id_image in zip(image_path_list, input_id_images):
     input_id_images = [input_id_image]
     dir_name = os.path.basename(image_path).split('.')[0]
-    if args.skip and os.path.exists("outputs/{}".format(dir_name)):
-        print("skip ", dir_name)
-        continue
+    # if args.skip and os.path.exists("outputs/{}".format(dir_name)):
+    #     print("skip ", dir_name)
+    #     continue
     ## Note that the trigger word `img` must follow the class word for personalization
     prompts = load_prompts(args.prompt)
     negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
@@ -162,17 +162,23 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     pipe.enable_vae_tiling()
     # print(input_id_images[0] if args.ip_adapter else None)
     seed_list = args.seed
-
+    size = (args.size, args.size)
+    if args.multi_ip_adapter:
+        ip_adapter_image_embed=[clip_embeds, id_embeds]
+    else:
+        ip_adapter_image_embed=[id_embeds]
     for prompt in prompts:
         for seed in seed_list:
             generator = torch.Generator(device=device).manual_seed(seed)
             frames = pipe(
                 prompt=prompt,
                 num_frames=16,
+                height=size[0],
+                width=size[1],
                 guidance_scale=8,
                 input_id_images=input_id_images,
                 negative_prompt=negative_prompt,
-                ip_adapter_image_embeds=[clip_embeds, id_embeds],
+                ip_adapter_image_embeds=ip_adapter_image_embed,
                 num_videos_per_prompt=1,
                 num_inference_steps=num_steps,
                 start_merge_step=start_merge_step,

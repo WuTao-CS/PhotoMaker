@@ -11,7 +11,7 @@ from diffusers.utils.import_utils import is_xformers_available
 from safetensors import safe_open
 from huggingface_hub.utils import validate_hf_hub_args
 from transformers import CLIPImageProcessor, CLIPTokenizer
-from diffusers import StableDiffusionXLPipeline, AnimateDiffSDXLPipeline
+from diffusers import StableDiffusionXLPipeline, AnimateDiffSDXLPipeline, AnimateDiffPipeline
 from diffusers.models.modeling_utils import _LOW_CPU_MEM_USAGE_DEFAULT, load_state_dict
 from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipelineOutput
 from diffusers.pipelines.animatediff import AnimateDiffPipelineOutput
@@ -306,9 +306,9 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
                 prompt_embeds_list.append(prompt_embeds)
 
             prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
+            class_tokens_mask = class_tokens_mask.to(device=device) # TODO: ignoring two-prompt case
 
         prompt_embeds = prompt_embeds.to(dtype=self.text_encoder_2.dtype, device=device)
-        class_tokens_mask = class_tokens_mask.to(device=device) # TODO: ignoring two-prompt case
 
         return prompt_embeds, pooled_prompt_embeds, class_tokens_mask
 
@@ -316,7 +316,7 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
     def interrupt(self):
         return self._interrupt
         
-    def set_fusion_model(self,unet_path):
+    def set_fusion_model(self,unet_path=None):
         self.load_photomaker_adapter(
             "./pretrain_model/PhotoMaker",
             subfolder="",
@@ -363,8 +363,15 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
             else:
                 attn_procs[name] = self.unet.attn_processors[name]
         self.unet.set_attn_processor(attn_procs)
-        result = self.unet.load_state_dict(torch.load(unet_path,map_location='cpu'), strict=True)
-        print(result)
+        if unet_path is not None:
+            model = torch.load(unet_path,map_location='cpu')
+            new_model = {}
+            for key in model.keys():
+                name = key[5:]
+                new_model[name]=model[key]
+            result = self.unet.load_state_dict(new_model, strict=True)
+            print(result)
+            del model
         return
     @torch.no_grad()
     def __call__(
@@ -468,15 +475,15 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
         self._interrupt = False 
         # self.set_fusion_model()
         #        
-        if prompt_embeds is not None and class_tokens_mask is None:
-            raise ValueError(
-                "If `prompt_embeds` are provided, `class_tokens_mask` also have to be passed. Make sure to generate `class_tokens_mask` from the same tokenizer that was used to generate `prompt_embeds`."
-            )
-        # check the input id images
-        if input_id_images is None:
-            raise ValueError(
-                "Provide `input_id_images`. Cannot leave `input_id_images` undefined for PhotoMaker pipeline."
-            )
+        # if prompt_embeds is not None and class_tokens_mask is None:
+        #     raise ValueError(
+        #         "If `prompt_embeds` are provided, `class_tokens_mask` also have to be passed. Make sure to generate `class_tokens_mask` from the same tokenizer that was used to generate `prompt_embeds`."
+        #     )
+        # # check the input id images
+        # if input_id_images is None:
+        #     raise ValueError(
+        #         "Provide `input_id_images`. Cannot leave `input_id_images` undefined for PhotoMaker pipeline."
+        #     )
         if not isinstance(input_id_images, list):
             input_id_images = [input_id_images]
 
@@ -518,10 +525,14 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
         
         # 4. Encode input prompt without the trigger word for delayed conditioning
         # encode, remove trigger word token, then decode
-        tokens_text_only = self.tokenizer.encode(prompt, add_special_tokens=False)
-        trigger_word_token = self.tokenizer.convert_tokens_to_ids(self.trigger_word)
-        tokens_text_only.remove(trigger_word_token)
-        prompt_text_only = self.tokenizer.decode(tokens_text_only, add_special_tokens=False)
+        if prompt_embeds_text_only is None:
+            tokens_text_only = self.tokenizer.encode(prompt, add_special_tokens=False)
+            trigger_word_token = self.tokenizer.convert_tokens_to_ids(self.trigger_word)
+            tokens_text_only.remove(trigger_word_token)
+            prompt_text_only = self.tokenizer.decode(tokens_text_only, add_special_tokens=False)
+        else:
+            prompt_text_only = prompt
+        
         (
             prompt_embeds_text_only,
             negative_prompt_embeds,
@@ -544,15 +555,17 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
         )
 
         # 5. Prepare the input ID images
-        dtype = next(self.id_encoder.parameters()).dtype
-        if not isinstance(input_id_images[0], torch.Tensor):
-            id_pixel_values = self.id_image_processor(input_id_images, return_tensors="pt").pixel_values
+        if class_tokens_mask is not None:
+            dtype = next(self.id_encoder.parameters()).dtype
+            if not isinstance(input_id_images[0], torch.Tensor):
+                id_pixel_values = self.id_image_processor(input_id_images, return_tensors="pt").pixel_values
 
-        id_pixel_values = id_pixel_values.unsqueeze(0).to(device=device, dtype=dtype) # TODO: multiple prompts
+            id_pixel_values = id_pixel_values.unsqueeze(0).to(device=device, dtype=dtype) # TODO: multiple prompts
 
-        # 6. Get the update text embedding with the stacked ID embedding
-        prompt_embeds, _ip_adapter_image_embeds = self.id_encoder(id_pixel_values, prompt_embeds, class_tokens_mask)
-        
+            # 6. Get the update text embedding with the stacked ID embedding
+
+            prompt_embeds, _ip_adapter_image_embeds = self.id_encoder(id_pixel_values, prompt_embeds, class_tokens_mask)
+            
         bs_embed, seq_len, _ = prompt_embeds.shape
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)

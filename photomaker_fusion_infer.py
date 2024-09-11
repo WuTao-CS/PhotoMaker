@@ -49,11 +49,11 @@ def get_parser(**parser_kwargs):
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
     parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
     parser.add_argument("-i", "--image", type=str, help="image")
-    parser.add_argument("--unet_path", type=str, help="image", default='checkpoints/checkpoint-3000/pytorch_model_final.bin')
+    parser.add_argument("--unet_path", type=str, help="image", default=None)
     parser.add_argument("-o","--output", type=str, default='outputs', help="output dir")
     parser.add_argument("--name", type=str, default='photomaker_mix', help="output name")
     parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
-    parser.add_argument("--size",type=int, default=1024, help="size of image")
+    parser.add_argument("--size",type=int, default=512, help="size of image")
     return parser
 
 def load_prompts(prompt_file):
@@ -70,7 +70,7 @@ parser = get_parser()
 args = parser.parse_args()
 base_model_path = './pretrain_model/RealVisXL_V4.0'
 device = "cuda"
-adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-sdxl-beta")
+adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-sdxl-beta")
 
 
 scheduler = DDIMScheduler.from_pretrained(
@@ -93,8 +93,8 @@ pipe = PhotoMakerAnimateDiffXLPipline.from_pretrained(
 ).to("cuda")
 print("load unet from ",args.unet_path)
 pipe.set_fusion_model(unet_path=args.unet_path)
-pipe.set_ip_adapter_scale([0.7,0.7])  
-pipe.enable_model_cpu_offload()
+# pipe.set_ip_adapter_scale([0.7,0.7])  
+# pipe.enable_model_cpu_offload()
 print("over")
 # define and show the input ID images
 
@@ -118,7 +118,6 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     id_embeds = torch.cat([neg_face_id_embeds, face_id_embeds], dim=0).to(dtype=torch.float16, device="cuda")
     # id_embeds = face_id_embeds
     clip_embeds = pipe.prepare_ip_adapter_image_embeds([input_id_images[0],input_id_images[0]], None, torch.device("cuda"), 1, True)[0]
-        
     ## Parameter setting
     num_steps = args.num_steps
     style_strength_ratio = 20
@@ -138,6 +137,8 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
             frames = pipe(
                 prompt=prompt,
                 num_frames=16,
+                height=size[0],
+                width=size[1],
                 guidance_scale=8,
                 input_id_images=input_id_images,
                 negative_prompt=negative_prompt,

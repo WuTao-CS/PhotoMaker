@@ -8,7 +8,7 @@ resource:
   worker_num: 1 # worker数，等于1为单机实验，大于1为多机试验
   worker: # 每个worker的配置
     cpu: 1 # worker cpu核数
-    gpu: 1 # worker gpu卡数
+    gpu: 8 # worker gpu卡数
     memory: 1 # 每个CPU内存大小Gb
 test1:
   program:
@@ -49,4 +49,9 @@ test8:
   program:
     work_dir: /group/40034/jackeywu/code/PhotoMaker/
     main_program: bash/8_test.sh # 执行程序名称
+    init_program: /group/40034/jackeywu/code/PhotoMaker/bash/init.sh # 环境初始化脚本，比如安装一些镜像中不存在但是又需要的包
+train:
+  program:
+    work_dir: /group/40034/jackeywu/code/PhotoMaker/
+    main_program: bash/train.sh # 执行程序名称
     init_program: /group/40034/jackeywu/code/PhotoMaker/bash/init.sh # 环境初始化脚本，比如安装一些镜像中不存在但是又需要的包

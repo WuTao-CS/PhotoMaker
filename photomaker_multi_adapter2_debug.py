@@ -70,7 +70,7 @@ def load_prompts(prompt_file):
 
 parser = get_parser()
 args = parser.parse_args()
-base_model_path = './pretrain_model/RealVisXL_V4.0'
+base_model_path = './pretrain_model/stable-diffusion-xl-base-1.0'
 device = "cuda"
 save_path = "./outputs"
 adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-sdxl-beta")

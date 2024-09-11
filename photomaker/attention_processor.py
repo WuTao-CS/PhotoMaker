@@ -7,7 +7,7 @@ try:
     import xformers
     import xformers.ops
     xformers_available = True
-except Exception as e:
+except Exception as e: 
     xformers_available = False
 import torch
 import torch.nn.functional as F
@@ -17,7 +17,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 from diffusers.models.attention_processor import Attention, IPAdapterAttnProcessor
-from .model import IDAttentionFusionBlock
+from .model import IDAttentionFusionBlock, IDAttentiontestFusionBlock
 xformers_available = False
 
 class MixIPAdapterAttnProcessor2_0(torch.nn.Module):
@@ -35,7 +35,7 @@ class MixIPAdapterAttnProcessor2_0(torch.nn.Module):
             the weight scale of image prompt.
     """
 
-    def __init__(self, hidden_size, cross_attention_dim=None, num_tokens=(4,), scale=1.0, video_length=16):
+    def __init__(self, hidden_size, cross_attention_dim=None, num_tokens=(4,), scale=1.0, video_length=16, mlp_ratio=4.0):
         super().__init__()
 
         if not hasattr(F, "scaled_dot_product_attention"):
@@ -45,7 +45,7 @@ class MixIPAdapterAttnProcessor2_0(torch.nn.Module):
 
         self.hidden_size = hidden_size
         self.cross_attention_dim = cross_attention_dim
-
+        self.mlp_ratio = mlp_ratio
         if not isinstance(num_tokens, (tuple, list)):
             num_tokens = [num_tokens]
         self.num_tokens = num_tokens
@@ -62,7 +62,8 @@ class MixIPAdapterAttnProcessor2_0(torch.nn.Module):
         self.to_v_ip = nn.ModuleList(
             [nn.Linear(cross_attention_dim, hidden_size, bias=False) for _ in range(len(num_tokens))]
         )
-        self.fusion = IDAttentionFusionBlock(hidden_size, num_frame=video_length)
+        self.fusion = IDAttentionFusionBlock(hidden_size, num_frame=video_length,mlp_ratio=self.mlp_ratio)
+        # self.fusion = IDAttentiontestFusionBlock(hidden_size, num_frame=video_length)
         self.freeze_params()
 
     def __call__(

@@ -70,7 +70,7 @@ class Annotator(nn.Module):
             pretrained_model_name_or_path, subfolder="vae",
             use_safetensors=True, 
         )
-        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained("./pretrain_model/CLIP-ViT-H-14-laion2B-s32B-b79K", torch_dtype=torch.float16)
+        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained("./pretrain_model/CLIP-ViT-H-14-laion2B-s32B-b79K")
         self.id_encoder = PhotoMakerIDEncoderForlabel()
         self.id_encoder.load_from_pretrained('./pretrain_model/PhotoMaker/photomaker-v1.bin')
         self.trigger_word = "img"
@@ -116,23 +116,6 @@ class Annotator(nn.Module):
             image_embeds = image_embeds.repeat_interleave(1, dim=0)
             ref_images=image_embeds
 
-
-        # ref_embeds = []
-        # for i in range(video.shape[0]):
-        #     image = video[i]
-        #     image = self.feature_extractor(image, return_tensors="pt").pixel_values
-
-        #     image = image.to(device=device, dtype=dtype)
-        #     if output_hidden_states:
-        #         image_enc_hidden_states = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
-        #         image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(1, dim=0)
-        #         ref_embeds.append(image_enc_hidden_states)
-        #     else:
-        #         image_embeds = self.image_encoder(image).image_embeds
-        #         image_embeds = image_embeds.repeat_interleave(1, dim=0)
-        #         ref_embeds.append(image_embeds)
-
-        # ref_images = torch.stack(ref_images, dim=0)
         return ref_images
         
     def encode_video_with_vae(self, video):

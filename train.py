@@ -25,14 +25,14 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, EulerDiscreteScheduler
+from diffusers import AutoencoderKL, DDPMScheduler, EulerDiscreteScheduler, DDIMScheduler
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
-
+import shutil
 from photomaker.model_fusion import MixIDTrainModel
 from photomaker.datasets.celebv_text import CelebVTextDataset
 from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_live
@@ -167,7 +167,7 @@ def parse_args():
         help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument(
         "--learning_rate",
@@ -194,6 +194,13 @@ def parse_args():
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
+        "--snr_gamma",
+        type=float,
+        default=None,
+        help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
+        "More details here: https://arxiv.org/abs/2303.09556.",
+    )
+    parser.add_argument(
         "--allow_tf32",
         action="store_true",
         help=(
@@ -204,7 +211,7 @@ def parse_args():
     parser.add_argument(
         "--dataloader_num_workers",
         type=int,
-        default=4,
+        default=8,
         help=(
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
@@ -222,6 +229,11 @@ def parse_args():
         default=None,
         help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediction_type` is chosen.",
     )
+    parser.add_argument(
+        "--unet_inject_txt",
+        type=str,
+        default="block.txt",
+        help="Path to the txt file containing the unet inject block.",)
     parser.add_argument(
         "--logging_dir",
         type=str,
@@ -316,6 +328,12 @@ def print_learnable_params(model, optimizer):
     return
 
 def main(args):
+    if args.report_to == "wandb" and args.hub_token is not None:
+        raise ValueError(
+            "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
+            " Please use `huggingface-cli login` to authenticate with the Hub."
+        )
+
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -333,24 +351,48 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # Disable AMP for MPS.
+    if torch.backends.mps.is_available():
+        accelerator.native_amp = False
+
     if args.report_to == "wandb":
         if not is_wandb_available():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
         import wandb
+
+    # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
     logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        # datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        # datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+        diffusers.utils.logging.set_verbosity_error()
 
+    # If passed along, set the training seed now.
+    if args.seed is not None:
+        set_seed(args.seed)
+
+    # Handle the repository creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
     # Load scheduler, tokenizer and models.
     model = MixIDTrainModel.from_pretrained(args.pretrained_model_name_or_path, video_length=args.video_length)
-    noise_scheduler = EulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    with open(args.unet_inject_txt, "r") as file:
+            # 读取文件内容并存储到列表中
+            string_list = file.readlines()
+    unet_inject_block = [line.strip() for line in string_list]
+    model.init_model(unet_inject_block)
     # freeze parameters of models to save more memory TODO
     model.train()
     model.unet.requires_grad_(False)
@@ -397,6 +439,7 @@ def main(args):
 
     if args.gradient_checkpointing:
         model.unet.enable_gradient_checkpointing()
+    
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -404,6 +447,9 @@ def main(args):
         weight_dtype = torch.bfloat16
     if args.with_vae:
         vae = vae.to(accelerator.device, dtype=torch.float32)
+    print("############### Model Weight dtype is ",weight_dtype)
+    model.weight_dtype = weight_dtype
+    model = model.to(accelerator.device, dtype=weight_dtype)
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -446,7 +492,6 @@ def main(args):
         num_workers=args.dataloader_num_workers,
     )
     gc.collect()
-    torch.cuda.empty_cache()
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
@@ -459,13 +504,17 @@ def main(args):
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
-    if args.with_vae:
-        vae = accelerator.prepare(vae)
-
+    
     print_learnable_params(model, optimizer)
-    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+    if args.with_vae:
+        # vae = accelerator.prepare(vae)
+        model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
+    else:
+        model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, lr_scheduler
+        )
 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -476,6 +525,8 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
+        destination_file = os.path.join(args.output_dir, "block.txt")
+        shutil.copyfile(args.unet_inject_txt, destination_file)
         accelerator.init_trackers("T2V_Mixfeature", config=vars(args))
     
     # Function for unwrapping if torch.compile() was used in accelerate.
@@ -534,13 +585,13 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            if args.with_vae:
-                with torch.no_grad():
-                    video_length = batch["video"].shape[1]
-                    latent = vae.encode(rearrange(batch["video"], "b f c h w -> (b f) c h w")).latent_dist.sample()
-                    batch["videos"] = rearrange(latent, "(b f) c h w -> b f c h w", f=video_length) * vae.config.scaling_factor
             with accelerator.accumulate(model):
-                outputs = model(batch, noise_scheduler, resolution=args.resolution)
+                if args.with_vae:
+                    with torch.no_grad():
+                        video_length = batch["video"].shape[1]
+                        latent = vae.encode(rearrange(batch["video"], "b f c h w -> (b f) c h w")).latent_dist.sample()
+                        batch["video"] = rearrange(latent, "(b f) c h w -> b c f h w", f=video_length) * vae.config.scaling_factor
+                outputs = model(batch, noise_scheduler, resolution=args.resolution, snr_gamma=args.snr_gamma)
                 loss = outputs["denoise_loss"]
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
@@ -549,7 +600,7 @@ def main(args):
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = model.unet.parameters()
+                    params_to_clip = params_to_optimize
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -583,10 +634,10 @@ def main(args):
 
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                                    shutil.rmtree(removing_checkpoint, ignore_errors=True)
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path,safe_serialization=False)
+                        accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -595,7 +646,7 @@ def main(args):
                 break
     if accelerator.is_main_process:
         save_path = os.path.join(args.output_dir, f"checkpoint-final")
-        accelerator.save_state(save_path, safe_serialization=False)
+        accelerator.save_state(save_path)
         logger.info(f"Saved state to {save_path}")
     accelerator.wait_for_everyone()
     accelerator.end_training()

@@ -1,6 +1,6 @@
 torch
-diffusers
-transformers
+diffusers==0.28.2
+transformers==4.44.0
 huggingface-hub
 spaces
 numpy
@@ -10,7 +10,8 @@ omegaconf
 insightface
 peft
 gradio
-timm
 einops
-onnxruntime
+deepspeed
+onnxruntime-gpu
 decord
+opencv-python==4.8.0.76

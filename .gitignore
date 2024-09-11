@@ -11,3 +11,4 @@ pretrain_model/*
 examples/*
 checkpoints*
 *.zip
+sh_checkpoints/*

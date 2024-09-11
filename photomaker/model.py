@@ -67,6 +67,13 @@ VISION_CONFIG_DICT = {
     "patch_size": 14,
     "projection_dim": 768
 }
+def zero_module(module):
+    """
+    Zero out the parameters of a module and return it.
+    """
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
 
 class MLP(nn.Module):
     def __init__(self, in_dim, out_dim, hidden_dim, use_residual=True):
@@ -75,7 +82,7 @@ class MLP(nn.Module):
             assert in_dim == out_dim
         self.layernorm = nn.LayerNorm(in_dim)
         self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.fc2 = zero_module(nn.Linear(hidden_dim, out_dim))
         self.use_residual = use_residual
         self.act_fn = nn.GELU()
 
@@ -505,13 +512,7 @@ class CrossAttention(nn.Module):
 #             # remove additional token
 #             out = out[:, n_tokens_to_mask:]
 #         return self.to_out(out)
-def zero_module(module):
-    """
-    Zero out the parameters of a module and return it.
-    """
-    for p in module.parameters():
-        p.detach().zero_()
-    return module
+
 
 class IDAttentionFusionBlock(nn.Module):
     def __init__(self, hidden_size, num_heads=8, mlp_ratio=4.0,time_ebed_size=1280, num_frame=16, **block_kwargs):
@@ -526,6 +527,10 @@ class IDAttentionFusionBlock(nn.Module):
             nn.SiLU(),
             zero_module(nn.Linear(time_ebed_size, 6 * hidden_size, bias=True)),
         )
+        # self.adaLN_modulation_ratio = nn.Sequential(
+        #     nn.Linear(time_ebed_size, 3, bias=True),
+        #     nn.SiLU(),
+        # )
         self.adaLN_modulation_ratio = nn.Sequential(
             nn.Linear(time_ebed_size, 3 * hidden_size, bias=True),
             nn.SiLU(),
@@ -540,8 +545,29 @@ class IDAttentionFusionBlock(nn.Module):
         x = text_feature + gate_msa.unsqueeze(1) * self.attn(text_feature, modulate(self.norm1(id_feature), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         x = ratio_text.unsqueeze(1)*x + id_feature
+        # print(ratio_face.shape)
+        # print(faceid_feature.shape)
+        # id_feature  = ratio_face *faceid_feature + ratio_clipi * clipi_feature
+        # x = text_feature + gate_msa.unsqueeze(1) * self.attn(text_feature, modulate(self.norm1(id_feature), shift_msa, scale_msa))
+        # x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        # x = ratio_text*x + id_feature
         return x
 
+class IDAttentiontestFusionBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads=8, mlp_ratio=4.0,time_ebed_size=1280, num_frame=16, **block_kwargs):
+        super().__init__()
+        self.num_frame = num_frame
+        self.adaLN_modulation_ratio = nn.Sequential(
+            nn.Linear(time_ebed_size, 3 * hidden_size, bias=True),
+            nn.SiLU(),
+        )
 
+    def forward(self, text_feature, clipi_feature, faceid_feature, time_emb):
+        time_emb = time_emb.repeat(self.num_frame, 1)
+        # shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(time_emb).chunk(6, dim=1)
+        ratio_face, ratio_clipi, ratio_text = self.adaLN_modulation_ratio(time_emb).chunk(3, dim=1)
+        # input_key = adain(clipi_feature,faceid_feature) + 
+        x = ratio_text.unsqueeze(1)*text_feature + ratio_face.unsqueeze(1) *faceid_feature + ratio_clipi.unsqueeze(1) * clipi_feature
+        return x
 if __name__ == "__main__":
     PhotoMakerIDEncoder()

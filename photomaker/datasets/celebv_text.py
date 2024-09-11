@@ -74,15 +74,19 @@ class CelebVTextProcessDataset(torch.utils.data.Dataset):
         self.video_length = video_length
         self.resolution = resolution
         self.frame_stride = frame_stride
-        self.details_path = glob(os.path.join(self.root,"texts/face40_details_new", "*.txt"))
-        self.details_path.sort()
-        per_devie_num = len(self.details_path)/total
+        if self.resolution[0]==512:
+            with open(os.path.join(self.root, "processed_512.json"), 'r') as file:
+                self.all_data = json.load(file)
+        else:
+            with open(os.path.join(self.root, "processed.json"), 'r') as file:
+                self.all_data = json.load(file)
+        per_devie_num = len(self.all_data)/total
         start = int(phase*per_devie_num)
         end = int((phase+1)*per_devie_num)
-        if end >= len(self.details_path):
-            self.details_path = self.details_path[start:]
+        if end >= len(self.all_data):
+            self.all_data = self.all_data[start:]
         else:
-            self.details_path = self.details_path[start:end]
+            self.all_data = self.all_data[start:end]
         self.spatial_transform_type = spatial_transform_type
         self.spatial_transform = make_spatial_transformations(self.resolution, type=self.spatial_transform_type) \
             if self.spatial_transform_type is not None else None
@@ -92,52 +96,21 @@ class CelebVTextProcessDataset(torch.utils.data.Dataset):
         self.num_ref_frames = num_ref_frames
 
     def __len__(self) -> int:
-        return len(self.details_path)
+        return len(self.all_data)
 
-    def _load_text(self, file_path: str) -> str:
-        # 打开文件并逐行读取内容
-        with open(file_path, 'r', encoding='utf-8') as file:
-            lines = file.readlines()
-
-        # 去掉每行末尾的换行符
-        lines = [line.strip() for line in lines]
-        final_new_text=""
-        final_text = ""
-        for text in lines:
-            new_text, is_inserted = insert_img_after_keyword(text)
-            if len(new_text)>len(final_new_text):
-                final_new_text=new_text
-                final_text=text
-            
-        if len(final_new_text)>0:
-            additionals = ["action_dur", "emotion", "light_dir", "light_color_temp", "light_intensity"]
-            for additional in additionals:
-                additional_path = os.path.join(
-                    self.root, 'texts', additional, os.path.basename(file_path)
-                )
-                try:
-                    with open(additional_path, "r") as f:
-                        add_text = f.readline().strip()
-                        final_new_text+=add_text
-                        final_text+=add_text
-                except FileNotFoundError:
-                    print(f"File {additional_path} not found.", "yellow")    
-            return final_text, final_new_text, True
-        return text, None, False
-    
     def __getitem__(self, index):
-        index = index % len(self.details_path)
-        text_file = self.details_path[index]
-        text, new_text, is_inserted = self._load_text(text_file)
+        index = index % len(self.all_data)
+        data = self.all_data[index]
+        text = data["prompt"]
+        name = os.path.basename(data["path"]).split(".")[0]
         video_path = os.path.join(
             self.root,
             "celebvtext_6",
-            f"{os.path.splitext(os.path.basename(text_file))[0]}.mp4",
+            f"{name}.mp4",
         )
-        name = os.path.splitext(os.path.basename(text_file))[0]
         video_reader = VideoReader(video_path, ctx=cpu(0), width=self.resolution[1], height=self.resolution[0])
-        if len(video_reader) < self.video_length or is_inserted is False:
-            self.faild_case.append(text_file)
+        if len(video_reader) < self.video_length:
+            self.faild_case.append(video_path)
             return {}
         
         fps_ori = video_reader.get_avg_fps()
@@ -170,12 +143,12 @@ class CelebVTextProcessDataset(torch.utils.data.Dataset):
         if self.spatial_transform is not None:
             frames = self.spatial_transform(frames)
         frames = (frames / 255 - 0.5) * 2
-        data={"video":frames, "prompt":text, "prompt_trigger":new_text, "video_path":video_path, "name":name,"ref_frames":ref_frames}
+        data={"video":frames, "prompt":text, "video_path":video_path, "name":name,"ref_frames":ref_frames}
         return data
 
     
 class CelebVTextDataset(torch.utils.data.Dataset):
-    def __init__(self, root: str, video_length = 16, resolution = [512,512], frame_stride=8, spatial_transform_type="resize_center_crop", num_ref_frames=16, get_latent_from_video=False, fixed_fps=None, prompt_trigger=True, with_scaling_factor=True):
+    def __init__(self, root: str, video_length = 16, resolution = [512,512], frame_stride=8, spatial_transform_type="resize_center_crop", num_ref_frames=16, get_latent_from_video=False, fixed_fps=None, prompt_trigger=True, with_scaling_factor=True,image_drop_ratio=0.05, text_drop_ratio=0.05, image_text_drop_ratio=0.05):
         self.root = root
         self.video_length = video_length
         self.resolution = resolution
@@ -194,6 +167,9 @@ class CelebVTextDataset(torch.utils.data.Dataset):
         self.frame_stride = frame_stride
         self.prompt_trigger = prompt_trigger
         self.with_scaling_factor =with_scaling_factor
+        self.image_drop_ratio = image_drop_ratio
+        self.text_drop_ratio = text_drop_ratio
+        self.image_text_drop_ratio = image_text_drop_ratio
         
 
     def __len__(self) -> int:
@@ -240,9 +216,11 @@ class CelebVTextDataset(torch.utils.data.Dataset):
                 frames = torch.load(data["path"], map_location='cpu')["latent"][:,:self.video_length,:,:]
             else:
                 frames = process_data["latent"][:,:self.video_length,:,:]
+            if self.with_scaling_factor:
+                frames = frames * 0.13025
         idx = random.randint(0, self.num_ref_frames-1)
         faces_id_idx = random.randint(0, process_data["face_ids"].shape[0]-1)
-        faces_id = process_data["face_ids"][faces_id_idx]
+        faces_id = process_data["face_ids"][faces_id_idx].unsqueeze(0)
         clip_emb = process_data["image_embeds"][idx].unsqueeze(0)
         if self.prompt_trigger:
             prompt_emb = process_data["prompt_embeds_trigger"][idx]
@@ -251,9 +229,21 @@ class CelebVTextDataset(torch.utils.data.Dataset):
             prompt_emb = process_data["prompt_emb"]
             pooled_prompt_emb = process_data["pooled_prompt_emb"]
         class_token_mask = process_data["class_tokens_mask"]
-        if self.with_scaling_factor:
-            frames = frames * 0.13025
 
+        # random drop
+        rand_num = random.random()
+        if rand_num < self.image_drop_ratio:
+            clip_emb = torch.zeros_like(clip_emb)
+            faces_id = torch.zeros_like(faces_id)
+        elif rand_num < (self.image_drop_ratio + self.text_drop_ratio):
+            prompt_emb = torch.zeros_like(prompt_emb)
+            pooled_prompt_emb = torch.zeros_like(pooled_prompt_emb)
+        elif rand_num < (self.image_drop_ratio + self.text_drop_ratio + self.image_text_drop_ratio):
+            prompt_emb = torch.zeros_like(prompt_emb)
+            pooled_prompt_emb = torch.zeros_like(pooled_prompt_emb)
+            clip_emb = torch.zeros_like(clip_emb)
+            faces_id = torch.zeros_like(faces_id)
+        
         return {"video":frames, "clip_emb":clip_emb, "prompt_emb":prompt_emb, "pooled_prompt_emb":pooled_prompt_emb, "faces_id":faces_id, "class_token_mask":class_token_mask, "prompt":prompt, "prompt_trigger":prompt_trigger}
         
             
