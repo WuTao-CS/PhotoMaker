@@ -18,7 +18,7 @@ from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_ava
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 from diffusers.models.attention_processor import Attention, IPAdapterAttnProcessor
 from .model import IDAttentionFusionBlock, IDAttentiontestFusionBlock
-xformers_available = False
+# xformers_available = False
 
 class MixIPAdapterAttnProcessor2_0(torch.nn.Module):
     r"""

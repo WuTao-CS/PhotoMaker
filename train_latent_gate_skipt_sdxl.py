@@ -25,20 +25,27 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, EulerDiscreteScheduler
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, MotionAdapter, UNet2DConditionModel, UNetMotionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
+import torch.nn as nn
+from model.attention_processor import LastFrameProjectAttnProcessor2_0, SkipMotionAttnProcessor2_0, LastFrameGatedAttnProcessor2_0, SkipLastFrameAttnProcessor2_0
+from model.datasets.celebv_text import CelebVTextSD15Dataset, CelebVTextSDXLDataset
 
-from photomaker.model_fusion import MixIDTrainModel
-from photomaker.datasets.celebv_text import CelebVTextDataset
-from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_live
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
 
-import torch_npu
-from torch_npu.contrib import transfer_to_npu
+    cann_available = True
+except Exception:
+    cann_available = False
+
+if cann_available is False:
+    torch.multiprocessing.set_start_method('spawn', force=True)
 # from torch_npu.contrib import transfer_to_npu
 logger = get_logger(__name__)
 # torch.multiprocessing.set_start_method('spawn', force=True)
@@ -49,21 +56,17 @@ def collate_fn(data):
     videos = torch.stack([example["video"] for example in data])
     prompt_embeds = torch.stack([example["prompt_emb"] for example in data])
     pooled_prompt_embeds = torch.stack([example["pooled_prompt_emb"] for example in data])
-    faces_id = torch.stack([example["faces_id"] for example in data])
-    clip_emb = torch.stack([example["clip_emb"] for example in data])
     prompt = [example["prompt"] for example in data]
-    prompt_trigger = [example["prompt_trigger"] for example in data]
+    ref_latents = torch.stack([example["ref_images_latent"] for example in data])
+    
     return {
         "video": videos,
         "prompt_embeds": prompt_embeds,
         "pooled_prompt_embeds": pooled_prompt_embeds,
-        "faces_id": faces_id,
-        "clip_emb": clip_emb,
+        "ref_images_latent": ref_latents,
         "prompt": prompt,
-        "prompt_trigger": prompt_trigger,
     }
 
-    
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -389,20 +392,76 @@ def main(args):
             os.makedirs(args.output_dir, exist_ok=True)
 
     # Load scheduler, tokenizer and models.
-    model = MixIDTrainModel.from_pretrained(args.pretrained_model_name_or_path, video_length=args.video_length)
-    noise_scheduler = EulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    unet = UNet2DConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="unet",
+        use_safetensors=True, 
+        variant="fp16"
+    )
+    motion_adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-sdxl-beta")
+    unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
+    noise_scheduler =DDIMScheduler.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="scheduler",
+        clip_sample=False,
+        timestep_spacing="linspace",
+        beta_schedule="linear",
+        steps_offset=1,
+    )
+    cross_attn_dim = unet.config.cross_attention_dim
+    attn_procs = {}
     with open(args.unet_inject_txt, "r") as file:
-            # 读取文件内容并存储到列表中
-            string_list = file.readlines()
-    unet_inject_block = [line.strip() for line in string_list]
-    model.init_model(unet_inject_block)
-    # freeze parameters of models to save more memory TODO
-    model.train()
-    model.unet.requires_grad_(False)
-    model.freeze_parameters()
-    # estimate_zero3_model_states_mem_needs_all_live(model,4)
-    # adapter_modules = model.adapter_modules
-    # accelerator.register_for_checkpointing(model.adapter_modules)
+        # 读取文件内容并存储到列表中
+        string_list = file.readlines()
+    inject_block = [line.strip() for line in string_list]
+    for name in unet.attn_processors.keys():
+        cross_attention_dim = None if name.endswith("attn1.processor") else cross_attn_dim
+        if name.startswith("mid_block"):
+            hidden_size = unet.config.block_out_channels[-1]
+        elif name.startswith("up_blocks"):
+            block_id = int(name[len("up_blocks.")])
+            hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+        elif name.startswith("down_blocks"):
+            block_id = int(name[len("down_blocks.")])
+            hidden_size = unet.config.block_out_channels[block_id]
+        if "motion_modules" in name:
+            attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
+        elif "encoder_hid_proj" in name:
+            attn_procs[name] = unet.attn_processors[name]
+        elif cross_attention_dim is None:
+            if name in inject_block:
+                attn_procs[name] = LastFrameGatedAttnProcessor2_0(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    num_frames=16
+                )
+            else:
+                attn_procs[name] = SkipLastFrameAttnProcessor2_0(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    num_frames=16
+                )          
+        else:
+            attn_procs[name] = LastFrameProjectAttnProcessor2_0(
+                hidden_size=hidden_size,
+                cross_attention_dim=cross_attention_dim,
+                num_frames=16
+            )                            
+    unet.set_attn_processor(attn_procs)
+    unet.train()
+    unet.requires_grad_(False)
+    params_to_optimize=[]
+    for name, parm in unet.named_parameters():
+        if "fuser_gate_" in name and "motion_modules" not in name and "encoder_hid_proj" not in name:
+            parm.requires_grad = True
+            params_to_optimize.append(parm)
+        else:
+            parm.requires_grad = False
+    # init gate atten
+    for n, m in unet.named_modules():
+        if "fuser_gate_" in n:
+            if isinstance(m, (nn.Linear, nn.LayerNorm)):
+                m.reset_parameters()
     if args.with_vae:
         vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
         vae.requires_grad_(False)
@@ -410,7 +469,7 @@ def main(args):
     if args.enable_npu_flash_attention:
         if is_torch_npu_available():
             logger.info("npu flash attention enabled.")
-            model.unet.enable_npu_flash_attention()
+            unet.enable_npu_flash_attention()
         else:
             raise ValueError("npu flash attention requires torch_npu extensions and is supported only on npu devices.")
     if args.enable_xformers_memory_efficient_attention:
@@ -422,26 +481,13 @@ def main(args):
                 logger.warning(
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
-            model.unet.enable_xformers_memory_efficient_attention()
+            unet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
-    # `accelerate` 0.16.0 will have better support for customized saving
-    # if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-    #     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-    #     def save_model_hook(models, weights, output_dir):
-    #         # TODO: save models
-    #         if accelerator.is_main_process:
-    #             for i, model in enumerate(models):
-    #                 model.save_pretrained(os.path.join(output_dir, "unet"))
-    #                 if weights:
-    #                     weights.pop()
-
-
-    #     accelerator.register_save_state_pre_hook(save_model_hook)
 
     if args.gradient_checkpointing:
-        model.unet.enable_gradient_checkpointing()
+        unet.enable_gradient_checkpointing()
     
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -451,8 +497,7 @@ def main(args):
     if args.with_vae:
         vae = vae.to(accelerator.device, dtype=torch.float32)
     print("############### Model Weight dtype is ",weight_dtype)
-    model.weight_dtype = weight_dtype
-    model = model.to(accelerator.device, dtype=weight_dtype)
+    unet = unet.to(accelerator.device, dtype=weight_dtype)
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -477,7 +522,6 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = model.get_learnable_parameters()
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -486,7 +530,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
     
-    train_dataset = CelebVTextDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution])
+    train_dataset = CelebVTextSDXLDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution])
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -508,15 +552,15 @@ def main(args):
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
     
-    print_learnable_params(model, optimizer)
+    print_learnable_params(unet, optimizer)
     if args.with_vae:
         # vae = accelerator.prepare(vae)
-        model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, lr_scheduler
+        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler
     )
     else:
-        model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            model, optimizer, train_dataloader, lr_scheduler
+        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, optimizer, train_dataloader, lr_scheduler
         )
 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -527,17 +571,16 @@ def main(args):
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
-    if accelerator.is_main_process:
-        destination_file = os.path.join(args.output_dir, "block.txt")
-        shutil.copyfile(args.unet_inject_txt, destination_file)
-        accelerator.init_trackers("T2V_Mixfeature", config=vars(args))
     
     # Function for unwrapping if torch.compile() was used in accelerate.
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
         return model
-    
+    if accelerator.is_main_process:
+        destination_file = os.path.join(args.output_dir, "block.txt")
+        shutil.copyfile(args.unet_inject_txt, destination_file)
+        accelerator.init_trackers("T2V_Latent", config=vars(args))
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -588,14 +631,88 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(model):
+            with accelerator.accumulate(unet):
                 if args.with_vae:
                     with torch.no_grad():
                         video_length = batch["video"].shape[1]
                         latent = vae.encode(rearrange(batch["video"], "b f c h w -> (b f) c h w")).latent_dist.sample()
                         batch["video"] = rearrange(latent, "(b f) c h w -> b c f h w", f=video_length) * vae.config.scaling_factor
-                outputs = model(batch, noise_scheduler, resolution=args.resolution, snr_gamma=args.snr_gamma)
-                loss = outputs["denoise_loss"]
+                resolution = args.resolution
+                latents = batch["video"].to(weight_dtype)
+                ref_latents = batch["ref_images_latent"].to(weight_dtype)
+                prompt_embeds = batch["prompt_embeds"].to(weight_dtype)
+                pooled_prompt_embeds = batch["pooled_prompt_embeds"].to(weight_dtype)
+                original_size = (resolution,resolution)
+                crops_coords_top_left = (0, 0)
+                target_size = (resolution,resolution)
+                if torch.any(torch.isnan(latents)):
+                    print("NaN found in latents, replacing with zeros")
+                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device
+                )
+                timesteps = timesteps.long()
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                def _get_add_time_ids(
+                    original_size, crops_coords_top_left, target_size, dtype, text_encoder_projection_dim=1280
+                ):
+                    add_time_ids = list(original_size + crops_coords_top_left + target_size)
+                    add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
+                    return add_time_ids
+
+                noisy_latents = torch.cat([noisy_latents, ref_latents], dim=2)
+                add_time_ids = _get_add_time_ids(original_size, crops_coords_top_left, target_size, dtype=weight_dtype)
+                add_time_ids = add_time_ids.to(device=latents.device).repeat(bsz, 1)   
+                added_cond_kwargs = {"text_embeds": pooled_prompt_embeds.to(noisy_latents.dtype), "time_ids": add_time_ids.to(noisy_latents.dtype)}
+
+                model_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    prompt_embeds,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,
+                )[0]
+                model_pred = model_pred[:,:,:16,:,:]
+                
+                # Get the target for loss depending on the prediction type
+                if args.prediction_type is not None:
+                    # set prediction_type of scheduler if defined
+                    noise_scheduler.register_to_config(prediction_type=args.prediction_type)
+
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(noisy_latents, noise, timesteps)
+                elif noise_scheduler.config.prediction_type == "sample":
+                    # We set the target to latents here, but the model_pred will return the noise sample prediction.
+                    target = noisy_latents
+                    # We will have to subtract the noise residual from the prediction to get the target sample.
+                    model_pred = model_pred - noise
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                
+                if args.snr_gamma is None:
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                else:
+                    # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+                    # Since we predict the noise instead of x_0, the original formulation is slightly changed.
+                    # This is discussed in Section 4.2 of the same paper.
+                    snr = compute_snr(noise_scheduler, timesteps)
+                    mse_loss_weights = torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(
+                        dim=1
+                    )[0]
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        mse_loss_weights = mse_loss_weights / snr
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        mse_loss_weights = mse_loss_weights / (snr + 1)
+
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+                    loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+                    loss = loss.mean()
+
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps

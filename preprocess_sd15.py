@@ -139,7 +139,7 @@ class Annotator(nn.Module):
         ref_frames = batch["ref_frames"][0]
         prompt = batch["prompt"][0]
         # Extract Face features using insightface
-        ref_images,bbox = self.get_face_image(ref_frames)
+        ref_images, bbox = self.get_face_image(ref_frames)
         if len(ref_images) == 0:
             return {}
         ref_images = torch.stack(ref_images, dim=0)

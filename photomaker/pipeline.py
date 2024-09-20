@@ -316,7 +316,7 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
     def interrupt(self):
         return self._interrupt
         
-    def set_fusion_model(self,unet_path=None):
+    def set_fusion_model(self,unet_path=None,inject_block_txt="/group/40034/jackeywu/code/PhotoMaker/block.txt"):
         self.load_photomaker_adapter(
             "./pretrain_model/PhotoMaker",
             subfolder="",
@@ -325,7 +325,7 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
         )
         self.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid-portrait_sdxl.bin"], image_encoder_folder=None)
         attn_procs = {}
-        with open("/group/40034/jackeywu/code/PhotoMaker/block.txt", "r") as file:
+        with open(inject_block_txt, "r") as file:
             # 读取文件内容并存储到列表中
             string_list = file.readlines()
         inject_block = [line.strip() for line in string_list]
@@ -343,16 +343,8 @@ class PhotoMakerAnimateDiffXLPipline(AnimateDiffSDXLPipeline):
                 attn_procs[name] = self.unet.attn_processors[name]
             elif "fusion" in name:
                 continue
-            elif name.startswith("up_blocks.0") and name in inject_block:
+            elif name in inject_block:
                 print(name)
-                attn_procs[name] = MixIPAdapterAttnProcessor2_0(
-                    hidden_size=hidden_size,
-                    cross_attention_dim=cross_attention_dim,
-                    scale=1.0,
-                    num_tokens=self.unet.attn_processors[name].num_tokens,
-                    video_length=16
-                ).to(dtype=torch.float16)
-            elif name.startswith("up_blocks.1"):
                 attn_procs[name] = MixIPAdapterAttnProcessor2_0(
                     hidden_size=hidden_size,
                     cross_attention_dim=cross_attention_dim,

@@ -75,6 +75,8 @@ class CelebVTextSD15Dataset(torch.utils.data.Dataset):
         self.frame_stride = frame_stride
         self.with_scaling_factor =with_scaling_factor
         self.text_drop_ratio = text_drop_ratio
+        self.image_drop_ratio = image_drop_ratio
+        self.image_text_drop_ratio = image_text_drop_ratio
         
 
     def __len__(self) -> int:
@@ -142,3 +144,71 @@ class CelebVTextSD15Dataset(torch.utils.data.Dataset):
         return {"video":frames, "prompt_embeds":prompt_embeds, "prompt":prompt, "ref_images_latent":ref_images_latent}
         
             
+class CelebVTextSDXLDataset(torch.utils.data.Dataset):
+    def __init__(self, root: str, video_length = 16, resolution = [512,512], frame_stride=8, spatial_transform_type="resize_center_crop", get_latent_from_video=False, fixed_fps=None, with_scaling_factor=True, text_drop_ratio=0.05, image_drop_ratio=0.05, image_text_drop_ratio=0.05):
+        self.root = root
+        self.video_length = video_length
+        self.resolution = resolution
+        if self.resolution[0]==512:
+            with open(os.path.join(self.root, "processed_sdxl_512_final.json"), 'r') as file:
+                self.all_data = json.load(file)
+        else:
+            Exception("Only support 512 resolution")
+        self.spatial_transform_type = spatial_transform_type
+        self.spatial_transform = make_spatial_transformations(self.resolution, type=self.spatial_transform_type) \
+            if self.spatial_transform_type is not None else None
+        self.fixed_fps = fixed_fps
+        self.get_latent_from_video = get_latent_from_video
+        self.frame_stride = frame_stride
+        self.with_scaling_factor =with_scaling_factor
+        self.text_drop_ratio = text_drop_ratio
+        self.image_drop_ratio = image_drop_ratio
+        self.image_text_drop_ratio = image_text_drop_ratio
+        
+
+    def __len__(self) -> int:
+        return len(self.all_data)
+    
+    def __getitem__(self, index):
+        index = index % len(self.all_data)
+        data = self.all_data[index]
+        prompt = data["prompt"]
+        process_data_path = data["path"]
+        base_name = os.path.basename(process_data_path).split(".")[0]
+        process_data_path = os.path.join(
+            self.root,
+            "processed_sdxl_512",
+            f"{base_name}.pt",
+        )
+        process_data = torch.load(process_data_path, map_location='cpu')
+        
+        if process_data["latent"].shape[0]==1:
+            video_ref = torch.cat([process_data["latent"].unsqueeze(dim=1),process_data["ref_images_latent"]],dim=1)
+            process_data["latent"]=video_ref[:,:,:self.video_length,:,:]
+            process_data["ref_images_latent"]=video_ref[:,:,self.video_length:,:,:]
+
+        frames = process_data["latent"][:,:self.video_length,:,:]
+        
+        if self.with_scaling_factor:
+            frames = frames * 0.13025
+        prompt_embeds = process_data["prompt_embeds"]
+        pooled_prompt_emb = process_data["pooled_prompt_embeds"]
+        ref_latent_id = random.randint(0, process_data["ref_images_latent"].shape[2]-1)
+        ref_images_latent = process_data["ref_images_latent"][:,:,ref_latent_id,:,:].unsqueeze(2)
+        if self.with_scaling_factor:
+            ref_images_latent = ref_images_latent * 0.13025
+        
+
+        # random drop
+        rand_num = random.random()
+        if rand_num < self.text_drop_ratio:
+            prompt_embeds = torch.zeros_like(prompt_embeds)
+            pooled_prompt_emb = torch.zeros_like(pooled_prompt_emb)
+        elif rand_num < (self.image_drop_ratio + self.text_drop_ratio):
+            ref_images_latent = torch.zeros_like(ref_images_latent)
+        elif rand_num < (self.image_drop_ratio + self.text_drop_ratio + self.image_text_drop_ratio):
+            prompt_embeds = torch.zeros_like(prompt_embeds)
+            pooled_prompt_emb = torch.zeros_like(pooled_prompt_emb)
+            ref_images_latent = torch.zeros_like(ref_images_latent)
+        
+        return {"video":frames.squeeze(dim=0), "prompt_emb":prompt_embeds, "prompt":prompt, "ref_images_latent":ref_images_latent.squeeze(dim=0), "pooled_prompt_emb":pooled_prompt_emb}

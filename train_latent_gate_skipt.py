@@ -396,7 +396,7 @@ def main(args):
         use_safetensors=True, 
         variant="fp16"
     )
-    motion_adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-v1-5-2")
+    motion_adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-v1-5-3")
     unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
     noise_scheduler =DDIMScheduler.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -423,13 +423,13 @@ def main(args):
         elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:
-            attn_procs[name] = LastFrameProjectAttnProcessor2_0(
+            attn_procs[name] = LastFrameGatedAttnProcessor2_0(
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_attention_dim,
                 num_frames=16
-            )
+            )          
         else:
-            attn_procs[name] = LastFrameGatedAttnProcessor2_0(
+            attn_procs[name] = LastFrameProjectAttnProcessor2_0(
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_attention_dim,
                 num_frames=16

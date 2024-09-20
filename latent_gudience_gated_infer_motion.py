@@ -75,7 +75,7 @@ pipe = VAEGatedAnimateDiffPipeline.from_pretrained(
     scheduler=scheduler,
 )
 print("load unet from ",args.unet_path)
-pipe.set_fusion_model(unet_path=args.unet_path,with_motion=True)
+pipe.set_fusion_model(unet_path=args.unet_path)
 pipe.to("cuda")
 print("over")
 # define and show the input ID images

@@ -36,7 +36,7 @@ import shutil
 from photomaker.model_fusion import MixIDTrainModel
 from photomaker.datasets.celebv_text import CelebVTextDataset
 from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_live
-
+from deepspeed.accelerator import get_accelerator
 logger = get_logger(__name__)
 torch.multiprocessing.set_start_method('spawn', force=True)
 if is_torch_npu_available():
@@ -50,6 +50,7 @@ def collate_fn(data):
     clip_emb = torch.stack([example["clip_emb"] for example in data])
     prompt = [example["prompt"] for example in data]
     prompt_trigger = [example["prompt_trigger"] for example in data]
+    process_data_path = [example["process_data_path"] for example in data]
     return {
         "video": videos,
         "prompt_embeds": prompt_embeds,
@@ -58,6 +59,7 @@ def collate_fn(data):
         "clip_emb": clip_emb,
         "prompt": prompt,
         "prompt_trigger": prompt_trigger,
+        "process_data_path":process_data_path,
     }
 
     
@@ -290,6 +292,9 @@ def parse_args():
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
     parser.add_argument(
+        "--enable_new_ip_adapter", action="store_true", help="Whether or not to use new ip-adapter."
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -388,15 +393,7 @@ def main(args):
     # Load scheduler, tokenizer and models.
     model = MixIDTrainModel.from_pretrained(args.pretrained_model_name_or_path, video_length=args.video_length)
     noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    with open(args.unet_inject_txt, "r") as file:
-            # 读取文件内容并存储到列表中
-            string_list = file.readlines()
-    unet_inject_block = [line.strip() for line in string_list]
-    model.init_model(unet_inject_block)
-    # freeze parameters of models to save more memory TODO
-    model.train()
-    model.unet.requires_grad_(False)
-    model.freeze_parameters()
+    
     # estimate_zero3_model_states_mem_needs_all_live(model,4)
     # adapter_modules = model.adapter_modules
     # accelerator.register_for_checkpointing(model.adapter_modules)
@@ -422,7 +419,15 @@ def main(args):
             model.unet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
-
+    with open(args.unet_inject_txt, "r") as file:
+        # 读取文件内容并存储到列表中
+        string_list = file.readlines()
+    unet_inject_block = [line.strip() for line in string_list]
+    model.init_model(unet_inject_block,new_ip_adapter=args.enable_new_ip_adapter)
+    # freeze parameters of models to save more memory TODO
+    model.train()
+    model.unet.requires_grad_(False)
+    model.freeze_parameters()
     # `accelerate` 0.16.0 will have better support for customized saving
     # if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
     #     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
@@ -641,6 +646,7 @@ def main(args):
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            # get_accelerator().empty_cache() 
             progress_bar.set_postfix(**logs)
             if global_step >= args.max_train_steps:
                 break

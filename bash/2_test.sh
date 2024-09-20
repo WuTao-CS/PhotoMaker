@@ -15,6 +15,9 @@
 #     --name "photomaker_mix_512_test" \
 #     --output "outputs/"
     
-python photomaker_clip.py \
+CUDA_VISIBLE_DEVICES=1 python photomaker_fusion_infer.py \
     -i 'datasets/lecun/yann-lecun.jpg' \
-    --output "photomaker_clipi_512_target1024"
+    --size 1024 \
+    --inject_block_txt "checkpoints/train_snr_lr1e5_npu_drop_long_time_ddim/block.txt" \
+    --unet_path "checkpoints/train_snr_lr1e5_npu_drop_long_time_ddim/checkpoint-16000/pytorch_model.bin" \
+    --output "outputs/train_snr_lr1e5_npu_drop_long_time_ddim/checkpoint-16000-1024/"

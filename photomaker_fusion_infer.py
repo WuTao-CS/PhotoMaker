@@ -49,11 +49,12 @@ def get_parser(**parser_kwargs):
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
     parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
     parser.add_argument("-i", "--image", type=str, help="image")
-    parser.add_argument("--unet_path", type=str, help="image", default=None)
+    parser.add_argument("--unet_path", type=str, help="model path", default=None)
+    parser.add_argument("--inject_block_txt", type=str, help="inject set", default="/group/40034/jackeywu/code/PhotoMaker/block.txt")
     parser.add_argument("-o","--output", type=str, default='outputs', help="output dir")
     parser.add_argument("--name", type=str, default='photomaker_mix', help="output name")
     parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
-    parser.add_argument("--size",type=int, default=512, help="size of image")
+    parser.add_argument("--size",type=int, default=512, help="size of video")
     return parser
 
 def load_prompts(prompt_file):
@@ -92,7 +93,8 @@ pipe = PhotoMakerAnimateDiffXLPipline.from_pretrained(
     variant="fp16",
 ).to("cuda")
 print("load unet from ",args.unet_path)
-pipe.set_fusion_model(unet_path=args.unet_path)
+pipe.set_fusion_model(unet_path=args.unet_path,inject_block_txt=args.inject_block_txt)
+print(pipe.unet)
 # pipe.set_ip_adapter_scale([0.7,0.7])  
 # pipe.enable_model_cpu_offload()
 print("over")
@@ -119,6 +121,9 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     # id_embeds = face_id_embeds
     clip_embeds = pipe.prepare_ip_adapter_image_embeds([input_id_images[0],input_id_images[0]], None, torch.device("cuda"), 1, True)[0]
     ## Parameter setting
+    print("#######################")
+    print(clip_embeds.shape)
+    print(id_embeds.shape)
     num_steps = args.num_steps
     style_strength_ratio = 20
     start_merge_step = int(float(style_strength_ratio) / 100 * num_steps)
@@ -139,7 +144,7 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
                 num_frames=16,
                 height=size[0],
                 width=size[1],
-                guidance_scale=8,
+                guidance_scale=6,
                 input_id_images=input_id_images,
                 negative_prompt=negative_prompt,
                 ip_adapter_image_embeds=[clip_embeds, id_embeds],

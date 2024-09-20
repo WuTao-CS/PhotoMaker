@@ -25,15 +25,15 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, EulerDiscreteScheduler, MotionAdapter, UNet2DConditionModel, UNetMotionModel
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, MotionAdapter, UNet2DConditionModel, UNetMotionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
-
-from model.attention_processor import LastFrameProjectAttnProcessor2_0
+import torch.nn as nn
+from model.attention_processor import LastFrameProjectAttnProcessor2_0, SkipMotionAttnProcessor2_0, LastFrameGatedAttnProcessor2_0, SkipLastMotionAttnProcessor2_0
 from model.datasets.celebv_text import CelebVTextSD15Dataset
 
 try:
@@ -396,9 +396,16 @@ def main(args):
         use_safetensors=True, 
         variant="fp16"
     )
-    motion_adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-v1-5-2")
+    motion_adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-v1-5-3")
     unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
-    noise_scheduler = EulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler =DDIMScheduler.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="scheduler",
+        clip_sample=False,
+        timestep_spacing="linspace",
+        beta_schedule="linear",
+        steps_offset=1,
+    )
     cross_attn_dim = unet.config.cross_attention_dim
     attn_procs = {}
     for name in unet.attn_processors.keys():
@@ -411,7 +418,9 @@ def main(args):
         elif name.startswith("down_blocks"):
             block_id = int(name[len("down_blocks.")])
             hidden_size = unet.config.block_out_channels[block_id]
-        if "motion_modules" in name or "encoder_hid_proj" in name:
+        if "motion_modules" in name:
+            attn_procs[name] = SkipLastMotionAttnProcessor2_0()
+        elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:
             attn_procs[name] = LastFrameProjectAttnProcessor2_0(

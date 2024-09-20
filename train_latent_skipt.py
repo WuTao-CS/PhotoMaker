@@ -398,7 +398,7 @@ def main(args):
     )
     motion_adapter = MotionAdapter.from_pretrained("pretrain_model/animatediff-motion-adapter-v1-5-2")
     unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
-    noise_scheduler = EulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     cross_attn_dim = unet.config.cross_attention_dim
     attn_procs = {}
     for name in unet.attn_processors.keys():
