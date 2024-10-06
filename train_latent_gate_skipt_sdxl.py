@@ -296,6 +296,12 @@ def parse_args():
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
     parser.add_argument(
+        "--enable_update_motion", action="store_true", help="Whether or not to update motion layer."
+    )
+    parser.add_argument(
+        "--disable_drop_image", action="store_true", help="Whether or not to close random drop for image condition."
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -425,7 +431,10 @@ def main(args):
             block_id = int(name[len("down_blocks.")])
             hidden_size = unet.config.block_out_channels[block_id]
         if "motion_modules" in name:
-            attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
+            if args.enable_update_motion:
+                attn_procs[name] = unet.attn_processors[name]
+            else:
+                attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
         elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:
@@ -451,12 +460,23 @@ def main(args):
     unet.train()
     unet.requires_grad_(False)
     params_to_optimize=[]
-    for name, parm in unet.named_parameters():
-        if "fuser_gate_" in name and "motion_modules" not in name and "encoder_hid_proj" not in name:
-            parm.requires_grad = True
-            params_to_optimize.append(parm)
-        else:
-            parm.requires_grad = False
+    if args.enable_update_motion:
+        for name, parm in unet.named_parameters():
+            if "fuser_gate_" in name and "encoder_hid_proj" not in name:
+                parm.requires_grad = True
+                params_to_optimize.append(parm)
+            elif "motion_modules" in name:
+                parm.requires_grad = True
+                params_to_optimize.append(parm)
+            else:
+                parm.requires_grad = False
+    else:
+        for name, parm in unet.named_parameters():
+            if "fuser_gate_" in name and "motion_modules" not in name and "encoder_hid_proj" not in name:
+                parm.requires_grad = True
+                params_to_optimize.append(parm)
+            else:
+                parm.requires_grad = False
     # init gate atten
     for n, m in unet.named_modules():
         if "fuser_gate_" in n:
@@ -529,8 +549,11 @@ def main(args):
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
-    
-    train_dataset = CelebVTextSDXLDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution])
+    if args.disable_drop_image:
+        print("### disable drop image ####")
+        train_dataset = CelebVTextSDXLDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution],text_drop_ratio=0.1, image_drop_ratio=0., image_text_drop_ratio=0.)
+    else:
+        train_dataset = CelebVTextSDXLDataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution])
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,

@@ -5,12 +5,47 @@
 # conda activate env-novelai 
 # cd /group/40034/jackeywu/code/PhotoMaker/
 
-CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer.py \
-    -i 'datasets/lecun/yann-lecun.jpg' \
-    --size 512 \
-    --inject_block_txt "checkpoints/train_snr_lr1e5_npu_drop_long_time_ddim/block.txt" \
-    --unet_path "checkpoints/train_snr_lr1e5_npu_drop_long_time_ddim/checkpoint-16000/pytorch_model.bin" \
-    --output "outputs/train_snr_lr1e5_npu_drop_long_time_ddim/checkpoint-16000-512/"
+# CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer.py \
+#     -i 'datasets/lecun/yann-lecun.jpg' \
+#     --size 512 \
+#     --pretrain_path "./pretrain_model/stable-diffusion-xl-base-1.0" \
+#     --inject_block_txt "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_high/block.txt" \
+#     --unet_path "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_high/checkpoint-38000/pytorch_model.bin" \
+#     --output "outputs/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_high/checkpoint-38000-512-sdxl/" \
+#     --enable_new_ip_adapter 
+
+# python latent_gudience_gated_infer_motion_sdxl.py \
+#     -i 'datasets/lecun/yann-lecun.jpg' \
+#     --size 512 \
+#     --unet_path "checkpoints/sdxl_gated_latent_fix_lr_1e-5_8v100/checkpoint-36000/pytorch_model.bin" \
+#     --output "outputs/sdxl_gated_latent_fix_lr_1e-5_8v100/checkpoint-36000" \
+#     --inject_block_txt "checkpoints/sdxl_gated_latent_fix_lr_1e-5_8v100/block.txt"
+
+
+    
+# CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer.py \
+#     -i 'datasets/lecun/yann-lecun.jpg' \
+#     --size 512 \
+#     --inject_block_txt "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/block.txt" \
+#     --unet_path "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/checkpoint-7000/pytorch_model.bin" \
+#     --output "outputs/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/checkpoint-7000-512/" \
+#     --enable_new_ip_adapter 
+
+# CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer.py \
+#     -i 'datasets/lecun/yann-lecun.jpg' \
+#     --size 1024 \
+#     --inject_block_txt "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/block.txt" \
+#     --unet_path "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/checkpoint-7000/pytorch_model.bin" \
+#     --output "outputs/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/checkpoint-7000-1024/" \
+#     --enable_new_ip_adapter 
+
+# CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer.py \
+#     -i 'datasets/lecun/yann-lecun.jpg' \
+#     --size 1024 \
+#     --inject_block_txt "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/block.txt" \
+#     --unet_path "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/checkpoint-15000/pytorch_model.bin" \
+#     --output "outputs/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_realv/checkpoint-15000-1024/" \
+#     --enable_new_ip_adapter 
 
 # python photomaker_fusion_infer.py \
 #     -i 'examples/newton_man/newton_0.jpg' \
@@ -33,7 +68,18 @@ CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer.py \
 # CUDA_VISIBLE_DEVICES=3 python photomaker_fusion_infer.py -i 'datasets/hp.jpg'  --prompt 'person.txt'
 # python photomaker_fusion_infer.py -i 'examples/yangmi_woman/yangmi_6.jpg'
 
-# python latent_gudience_gated_infer.py \
+# python latent_gudience_gated_infer_motion_sdxl.py \
 #     -i 'datasets/lecun/yann-lecun.jpg' \
-#     --unet_path "checkpoints/sd15_gate_latent_fix_lr_1e-5_skipt-a100/checkpoint-96000/pytorch_model.bin" \
-#     --output "outputs/sd15_gate_latent_fix_lr_1e-5_skipt-a100/checkpoint-96000" 
+#     --size 512 \
+#     --unet_path "checkpoints/sdxl_gated_latent_fix_lr_1e-5_4a100/checkpoint-12000/pytorch_model.bin" \
+#     --output "outputs/sdxl_gated_latent_fix_lr_1e-5_4a100/checkpoint-12000" \
+#     --inject_block_txt "checkpoints/sdxl_gated_latent_fix_lr_1e-5_4a100/block.txt"
+
+echo 'Begin to install python packages...'
+nvidia-smi
+conda init
+source ~/.bashrc
+echo "conda activate env-novelai"
+conda activate env-novelai 
+cd /group/40034/jackeywu/code/PhotoMaker/
+CUDA_VISIBLE_DEVICES=0 python process_reg_data.py --phase 0

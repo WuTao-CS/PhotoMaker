@@ -1,5 +1,5 @@
 torch
-diffusers
+diffusers>=0.28.2
 transformers>=4.44.0
 huggingface-hub
 spaces
@@ -12,6 +12,7 @@ peft
 gradio
 einops
 deepspeed
-onnxruntime-gpu
+onnxruntime-gpu==1.15.1
 decord
 opencv-python
+deepspeed

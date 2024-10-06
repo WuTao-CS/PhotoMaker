@@ -295,6 +295,12 @@ def parse_args():
     parser.add_argument(
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
+     parser.add_argument(
+        "--enable_update_motion", action="store_true", help="Whether or not to update motion layer."
+    )
+    parser.add_argument(
+        "--disable_drop_image", action="store_true", help="Whether or not to close random drop for image condition."
+    )
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
@@ -425,7 +431,10 @@ def main(args):
             block_id = int(name[len("down_blocks.")])
             hidden_size = unet.config.block_out_channels[block_id]
         if "motion_modules" in name:
-            attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
+            if args.enable_update_motion:
+                attn_procs[name] = unet.attn_processors[name]
+            else:
+                attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
         elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:
@@ -452,12 +461,15 @@ def main(args):
     unet.requires_grad_(False)
     params_to_optimize=[]
     for name, parm in unet.named_parameters():
-        if "attn1" in name and "motion_modules" not in name:
+        if "attn1" in name and "encoder_hid_proj" not in name and "motion_modules" not in name::
             for train_name in inject_block:
                 if train_name in name:
                     parm.requires_grad = True
                     params_to_optimize.append(parm)
                     break
+        elif args.enable_update_motion and "motion_modules" in name
+            parm.requires_grad = True
+            params_to_optimize.append(parm)
         else:
             parm.requires_grad = False
     if args.with_vae:
@@ -569,17 +581,15 @@ def main(args):
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
-    if accelerator.is_main_process:
-        destination_file = os.path.join(args.output_dir, "block.txt")
-        shutil.copyfile(args.unet_inject_txt, destination_file)
-        accelerator.init_trackers("T2V_Mixfeature", config=vars(args))
-    
+
     # Function for unwrapping if torch.compile() was used in accelerate.
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
         return model
     if accelerator.is_main_process:
+        destination_file = os.path.join(args.output_dir, "block.txt")
+        shutil.copyfile(args.unet_inject_txt, destination_file)
         accelerator.init_trackers("T2V_Latent", config=vars(args))
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps

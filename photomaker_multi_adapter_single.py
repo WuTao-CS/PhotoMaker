@@ -114,6 +114,7 @@ pipe.load_photomaker_adapter(
 pipe.id_encoder.to(device)
 if args.multi_ip_adapter:
     if args.clip_h:
+        print("############ load new adapter #######################")
         pipe.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter-plus-face_sdxl_vit-h.bin',"ip-adapter-faceid_sdxl.bin"], image_encoder_folder=None)
     else:
         pipe.load_ip_adapter(["./pretrain_model/IP-Adapter","./pretrain_model/IP-Adapter-FaceID/"], subfolder=["sdxl_models",None], weight_name=['ip-adapter_sdxl.bin',"ip-adapter-faceid_sdxl.bin"], image_encoder_folder='image_encoder')

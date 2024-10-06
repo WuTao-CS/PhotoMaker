@@ -18,12 +18,12 @@
 #   --resume_from_checkpoint="latest" \
 #   --snr_gamma 5.0
 accelerate launch --config_file 'bash/accelerate_config_4a100.yaml' \
-  train_latent.py \
+  train_latent_gate_skipt_new.py \
   --pretrained_model_name_or_path="./pretrain_model/stable-diffusion-v1-5" \
   --train_data_dir "datasets/CeleV-Text" \
-  --checkpointing_steps=3000 \
+  --checkpointing_steps=5000 \
   --resolution 512 \
-  --output_dir "checkpoints/sd15_gate_latent_fix_lr_1e-5_a100-motion" \
+  --output_dir "checkpoints/sd15_gate_latent_fix_lr_1e-5_a100-without-motion" \
   --checkpoints_total_limit=10 \
   --num_train_epochs=100 \
   --train_batch_size=1 \

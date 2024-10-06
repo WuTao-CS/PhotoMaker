@@ -49,12 +49,16 @@ def get_parser(**parser_kwargs):
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
     parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
     parser.add_argument("-i", "--image", type=str, help="image")
+    parser.add_argument("--pretrain_path", type=str, default="./pretrain_model/RealVisXL_V4.0")
     parser.add_argument("--unet_path", type=str, help="model path", default=None)
     parser.add_argument("--inject_block_txt", type=str, help="inject set", default="/group/40034/jackeywu/code/PhotoMaker/block.txt")
     parser.add_argument("-o","--output", type=str, default='outputs', help="output dir")
     parser.add_argument("--name", type=str, default='photomaker_mix', help="output name")
     parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
     parser.add_argument("--size",type=int, default=512, help="size of video")
+    parser.add_argument(
+        "--enable_new_ip_adapter", action="store_true", help="Whether or not to use new ip-adapter."
+    )
     return parser
 
 def load_prompts(prompt_file):
@@ -69,11 +73,11 @@ def load_prompts(prompt_file):
 
 parser = get_parser()
 args = parser.parse_args()
-base_model_path = './pretrain_model/RealVisXL_V4.0'
+base_model_path = args.pretrain_path
 device = "cuda"
 adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-sdxl-beta")
 
-
+print("load pretrain model from", base_model_path)
 scheduler = DDIMScheduler.from_pretrained(
     base_model_path,
     subfolder="scheduler",
@@ -93,7 +97,7 @@ pipe = PhotoMakerAnimateDiffXLPipline.from_pretrained(
     variant="fp16",
 ).to("cuda")
 print("load unet from ",args.unet_path)
-pipe.set_fusion_model(unet_path=args.unet_path,inject_block_txt=args.inject_block_txt)
+pipe.set_fusion_model(unet_path=args.unet_path,inject_block_txt=args.inject_block_txt,new_ip_adapter=args.enable_new_ip_adapter)
 print(pipe.unet)
 # pipe.set_ip_adapter_scale([0.7,0.7])  
 # pipe.enable_model_cpu_offload()
@@ -144,7 +148,7 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
                 num_frames=16,
                 height=size[0],
                 width=size[1],
-                guidance_scale=6,
+                guidance_scale=7.5,
                 input_id_images=input_id_images,
                 negative_prompt=negative_prompt,
                 ip_adapter_image_embeds=[clip_embeds, id_embeds],

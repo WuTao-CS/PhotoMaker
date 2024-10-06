@@ -24,13 +24,13 @@ echo "conda activate env-novelai"
 conda activate env-novelai 
 cd /group/40034/jackeywu/code/PhotoMaker/
 
-accelerate launch --config_file 'bash/accelerate_config_8v100.yaml' \
-  train_latent_gate_skipt_sdxl.py \
-  --pretrained_model_name_or_path="./pretrain_model/RealVisXL_V4.0" \
+accelerate launch --config_file 'bash/accelerate_config_8a100.yaml' \
+  train_latent_new.py \
+  --pretrained_model_name_or_path="./pretrain_model/Realistic_Vision_V5.1_noVAE" \
   --train_data_dir "datasets/CeleV-Text" \
-  --checkpointing_steps=3000 \
+  --checkpointing_steps=5000 \
   --resolution 512 \
-  --output_dir "checkpoints/sdxl_gated_latent_fix_lr_1e-5_8v100" \
+  --output_dir "checkpoints/sd15_latent_fix_lr_1e-5_8v100-with-motion" \
   --checkpoints_total_limit=10 \
   --num_train_epochs=100 \
   --train_batch_size=1 \
@@ -40,6 +40,6 @@ accelerate launch --config_file 'bash/accelerate_config_8v100.yaml' \
   --max_grad_norm=1 \
   --lr_scheduler="constant" --lr_warmup_steps=0 \
   --resume_from_checkpoint="latest" \
-  --snr_gamma 5.0 \
-  --unet_inject_txt 'block_sdxl_v100.txt'
+  --enable_update_motion \
+  --snr_gamma 5.0
 
