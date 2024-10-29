@@ -130,6 +130,11 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--frame_stride",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
         "--checkpointing_steps",
         type=int,
         default=500,
@@ -226,6 +231,7 @@ def parse_args():
     parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
     parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
+    
     parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument(
         "--prediction_type",
@@ -296,6 +302,20 @@ def parse_args():
     parser.add_argument(
         "--enable_update_motion", action="store_true", help="Whether or not to update motion layer."
     )
+    parser.add_argument(
+        "--enable_reference_noisy", action="store_true", help="Whether or not to update motion layer."
+    )
+    parser.add_argument(
+        "--refer_noisy_type",
+        type=str,
+        default="mean",
+        help="mean or random.",
+    )
+    parser.add_argument(
+        "--enable_origin_cross_attn", action="store_true", help="Whether or not to update motion layer."
+    )
+    parser.add_argument("--ref_noisy_ratio", type=float, default=1e-2, help="Weight decay to use.")
+    parser.add_argument("--ref_loss_weight", type=float, default=0.1, help="Weight decay to use.")
     parser.add_argument(
         "--disable_drop_image", action="store_true", help="Whether or not to close random drop for image condition."
     )
@@ -423,10 +443,7 @@ def main(args):
             block_id = int(name[len("down_blocks.")])
             hidden_size = unet.config.block_out_channels[block_id]
         if "motion_modules" in name:
-            if args.enable_update_motion:
-                attn_procs[name] = unet.attn_processors[name]
-            else:
-                attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
+            attn_procs[name] = unet.attn_processors[name]
         elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:
@@ -436,11 +453,14 @@ def main(args):
                 num_frames=16
             )
         else:
-            attn_procs[name] = NewLastFrameProjectAttnProcessor2_0(
-                hidden_size=hidden_size,
-                cross_attention_dim=cross_attention_dim,
-                num_frames=16
-            )                            
+            if args.enable_origin_cross_attn:
+                attn_procs[name] = unet.attn_processors[name]   
+            else:
+                attn_procs[name] = NewLastFrameProjectAttnProcessor2_0(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    num_frames=16
+                )                            
     unet.set_attn_processor(attn_procs)
     unet.train()
     unet.requires_grad_(False)
@@ -523,7 +543,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
     
-    train_dataset = CelebVTextSD15Dataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution])
+    train_dataset = CelebVTextSD15Dataset(args.train_data_dir, get_latent_from_video=args.with_vae, video_length=args.video_length, resolution=[args.resolution,args.resolution],frame_stride=args.frame_stride)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -626,6 +646,7 @@ def main(args):
                 if args.with_vae:
                     with torch.no_grad():
                         video_length = batch["video"].shape[1]
+                        batch["video"].to(dtype=torch.float32)
                         latent = vae.encode(rearrange(batch["video"], "b f c h w -> (b f) c h w")).latent_dist.sample()
                         batch["video"] = rearrange(latent, "(b f) c h w -> b c f h w", f=video_length) * vae.config.scaling_factor
                 # Convert images to latent space
@@ -644,7 +665,15 @@ def main(args):
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
-
+                if args.enable_reference_noisy:
+                    if args.refer_noisy_type == "mean":
+                        noise_ref = torch.mean(noise, dim=2, keepdim=True)
+                    elif args.refer_noisy_type == "random":
+                        noise_ref = torch.randn_like(ref_latents)
+                    else:
+                        raise ValueError(f"Unknown refer noisy type {args.refer_noisy_type}")
+                    ref_timesteps = torch.tensor(int(timesteps * args.ref_noisy_ratio),dtype=torch.int)
+                    ref_latents = noise_scheduler.add_noise(ref_latents, noise_ref, ref_timesteps)
   
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 noisy_latents = torch.cat([noisy_latents, ref_latents], dim=2)
@@ -665,6 +694,7 @@ def main(args):
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
+                ref_pred = model_pred[:,:,-1:,:,:]
                 model_pred = model_pred[:,:,:16,:,:]
                 
                 # Get the target for loss depending on the prediction type
@@ -702,6 +732,9 @@ def main(args):
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
                     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
                     loss = loss.mean()
+                if args.enable_reference_noisy:
+                    ref_loss = F.mse_loss(noise_ref.float(), ref_pred.float(), reduction="mean")
+                    loss = loss + args.ref_loss_weight * ref_loss
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()

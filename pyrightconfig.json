@@ -1,0 +1,7 @@
+{
+    "exclude": [
+        "datasets",
+        "pretrain_model",
+        "checkpoints",
+    ]
+}

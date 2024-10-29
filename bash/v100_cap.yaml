@@ -1,6 +1,6 @@
 model_name: PhotoMaker # 实验名称
 description: "PhotoMaker train" # 模型描述说明
-resource_group_name: rg-pcgarc-chongqin #rg-pcgarc-chongqin rg_pcgarc_v100_cq_unreliable
+resource_group_name: rg-pcgarc-chongqin # rg-pcgarc-chongqin #rg-pcgarc-chongqin rg_pcgarc_v100_cq_unreliable
 priority: high # 优先级，非必填
 framework: pytorch # 可选，训练框架 默认 tensorflow 类型
 framework_version: "1.9" #训练框架版本

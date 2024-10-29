@@ -1,19 +1,3 @@
-# echo 'Begin to install python packages...'
-# nvidia-smi
-# conda init
-# source ~/.bashrc
-# echo "conda activate env-novelai"
-# conda activate env-novelai 
-# cd /group/40034/jackeywu/code/PhotoMaker/
-# python preprocess_sd15.py --phase 0
-
-# CUDA_VISIBLE_DEVICES=0 python photomaker_fusion_infer_crop_face.py \
-#     -i 'datasets/lecun/yann-lecun.jpg' \
-#     --size 1024 \
-#     --inject_block_txt "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_high/block.txt" \
-#     --unet_path "checkpoints/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_high/checkpoint-38000/pytorch_model.bin" \
-#     --output "outputs/train_snr_lr1e5_4a100_drop_long_time_new_ip-adapter_xformer_high/checkpoint-38000-512-crop-face/" \
-#     --enable_new_ip_adapter 
 echo 'Begin to install python packages...'
 nvidia-smi
 conda init
@@ -21,4 +5,78 @@ source ~/.bashrc
 echo "conda activate env-novelai"
 conda activate env-novelai 
 cd /group/40034/jackeywu/code/PhotoMaker/
-CUDA_VISIBLE_DEVICES=2 python process_reg_data.py --phase 2
+PHASE=2
+
+
+
+epochs_name=("checkpoint-150000" "checkpoint-200000")
+checkpoint_dir="sd15_latent_new_lr_1e-5_4a100-with-motion-update-1016-with-ref-noisy-cross-attn"
+for name in ${epochs_name[@]}
+    do
+    dir_path="checkpoints/$checkpoint_dir/$name/"
+    output_dir="outputs_seed/$checkpoint_dir/$name/"
+    ckpt="checkpoints/$checkpoint_dir/$name/pytorch_model.bin"
+    python eval_latent_gudience_infer_many.py \
+        --unet_path $ckpt \
+        --output $output_dir \
+        --enable_update_motion \
+        --enable_crop_face \
+        --enable_origin_cross_attn \
+        --seed 128 512 1024 \
+        --phase $PHASE
+        
+    done
+
+epochs_name=("checkpoint-150000" "checkpoint-200000")
+checkpoint_dir="sd15_latent_new_lr_1e-5_4a100-with-motion-no-update-1016-with-ref-noisy-cross-attn"
+for name in ${epochs_name[@]}
+    do
+    dir_path="checkpoints/$checkpoint_dir/$name/"
+    output_dir="outputs_seed/time_infer/$checkpoint_dir/$name/"
+    ckpt="checkpoints/$checkpoint_dir/$name/pytorch_model.bin"
+    python python eval_latent_gudience_infer_many.py \
+        --unet_path $ckpt \
+        --output $output_dir \
+        --enable_update_motion \
+        --enable_crop_face \
+        --enable_origin_cross_attn \
+        --seed 128 512 1024 \
+        --phase $PHASE
+
+    done
+
+epochs_name=("checkpoint-150000" "checkpoint-200000")
+checkpoint_dir="sd15_latent_new_lr_1e-5_4a100-with-motion-1004"
+for name in ${epochs_name[@]}
+    do
+    dir_path="checkpoints/$checkpoint_dir/$name/"
+    output_dir="outputs_seed/time_infer/$checkpoint_dir/$name/"
+    ckpt="checkpoints/$checkpoint_dir/$name/pytorch_model.bin"
+    python python eval_latent_gudience_infer_many.py \
+        --unet_path $ckpt \
+        --output $output_dir \
+        --enable_update_motion \
+        --enable_crop_face \
+        --enable_origin_cross_attn \
+        --seed 128 512 1024 \
+        --phase $PHASE
+
+    done
+
+epochs_name=("checkpoint-150000" "checkpoint-200000")
+checkpoint_dir="sd15_latent_new_lr_1e-5_4a100-with-motion-1004"
+for name in ${epochs_name[@]}
+    do
+    dir_path="checkpoints/$checkpoint_dir/$name/"
+    output_dir="outputs_seed/time_infer/$checkpoint_dir/$name/"
+    ckpt="checkpoints/$checkpoint_dir/$name/pytorch_model.bin"
+    python python eval_latent_gudience_infer_many.py \
+        --unet_path $ckpt \
+        --output $output_dir \
+        --enable_update_motion \
+        --enable_crop_face \
+        --enable_origin_cross_attn \
+        --seed 128 512 1024 \
+        --phase $PHASE
+
+    done

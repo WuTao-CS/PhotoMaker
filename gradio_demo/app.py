@@ -141,13 +141,13 @@ def get_example():
             get_image_path_list('./examples/scarletthead_woman'),
             "instagram photo, portrait photo of a woman img, colorful, perfect face, natural skin, hard shadows, film grain",
             "(No style)",
-            "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth",
+            "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch, multiple people, text on the screen, no people, unclear faces), open mouth",
         ],
         [
             get_image_path_list('./examples/newton_man'),
             "sci-fi, closeup portrait photo of a man img wearing the sunglasses in Iron man suit, face, slim body, high quality, film grain",
             "(No style)",
-            "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth",
+            "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch, multiple people, text on the screen, no people, unclear faces), open mouth",
         ],
     ]
     return case

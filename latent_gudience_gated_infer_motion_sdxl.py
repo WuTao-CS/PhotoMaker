@@ -92,7 +92,7 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     dir_name = os.path.basename(image_path).split('.')[0]
     ## Note that the trigger word `img` must follow the class word for personalization
     prompts = load_prompts(args.prompt)
-    negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch)"
+    negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch, multiple people, text on the screen, no people, unclear faces)"
     # print(input_id_images[0] if args.ip_adapter else None)
     seed_list = args.seed
     input_id_image_emb = pipe.prepare_reference_image_embeds(input_id_image, None, torch.device("cuda"), 1)

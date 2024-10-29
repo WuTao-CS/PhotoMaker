@@ -60,12 +60,13 @@ def extract_face_features(image_lst: list, input_size=(640, 640)):
 def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
-    parser.add_argument("-p", "--prompt", type=str, default='emjoy.txt', help="prompt file path")
+    parser.add_argument("-p", "--prompt", type=str, default='dog_prompts.txt', help="prompt file path")
     parser.add_argument("-i", "--image", type=str, help="image")
     parser.add_argument("--unet_path", type=str, help="image", default=None)
     parser.add_argument("-o","--output", type=str, default='outputs', help="output dir")
     parser.add_argument("--name", type=str, default='photomaker_mix', help="output name")
     parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
+    parser.add_argument("--cfg", type=int, default=8, help="number of steps")
     parser.add_argument("--size",type=int, default=512, help="size of image")
     parser.add_argument(
         "--enable_update_motion", action="store_true", help="Whether or not to update motion layer."
@@ -73,6 +74,16 @@ def get_parser(**parser_kwargs):
     parser.add_argument(
         "--enable_crop_face", action="store_true", help="Whether or not to only face."
     )
+    parser.add_argument(
+        "--enable_euler", action="store_true", help="Whether or not to only face."
+    )
+    parser.add_argument(
+        "--enable_origin_cross_attn", action="store_true", help="Whether or not to use origin cross-attention."
+    )
+    parser.add_argument(
+        "--enable_reference_image_noisy", action="store_true", help="Whether or not to use origin cross-attention."
+    )
+    
     return parser
 
 def load_prompts(prompt_file):
@@ -91,23 +102,32 @@ base_model_path = './pretrain_model/Realistic_Vision_V5.1_noVAE'
 device = "cuda"
 adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-v1-5-3")
 
-
-scheduler = DDIMScheduler.from_pretrained(
-    base_model_path,
-    subfolder="scheduler",
-    clip_sample=False,
-    timestep_spacing="linspace",
-    beta_schedule="linear",
-    steps_offset=1,
-)
-
+if args.enable_euler:
+    scheduler = EulerDiscreteScheduler.from_pretrained(
+        base_model_path,
+        subfolder="scheduler",
+        timestep_spacing='leading', 
+        steps_offset=1,	
+        beta_schedule="scaled_linear",
+        beta_start=0.00085,
+        beta_end=0.020
+    )
+else:
+    scheduler = DDIMScheduler.from_pretrained(
+        base_model_path,
+        subfolder="scheduler",
+        clip_sample=False,
+        timestep_spacing="linspace",
+        beta_schedule="linear",
+        steps_offset=1,
+    )
 pipe = VAEProjectAnimateDiffPipeline.from_pretrained(
     base_model_path,
     motion_adapter=adapter,
     scheduler=scheduler,
 ).to("cuda")
 print("load unet from ",args.unet_path)
-pipe.set_fusion_model(unet_path=args.unet_path, enable_update_motion=args.enable_update_motion)
+pipe.set_fusion_model(unet_path=args.unet_path, enable_update_motion=args.enable_update_motion, enable_origin_cross_attn=args.enable_origin_cross_attn)
 print("over")
 # define and show the input ID images
 pipe.enable_vae_slicing()
@@ -140,11 +160,12 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
             frames = pipe(
                 prompt=prompt,
                 num_frames=16,
-                guidance_scale=8,
+                guidance_scale=args.cfg,
                 reference_image_embeds = input_id_image_emb,
                 negative_prompt=negative_prompt,
                 num_videos_per_prompt=1,
                 generator=generator,
+                reference_image_noisy=args.enable_reference_image_noisy,
             ).frames[0]
             os.makedirs("{}/{}".format(args.output,dir_name), exist_ok=True)
             export_to_gif(frames, "{}/{}/{}_{}_seed_{}.gif".format(args.output, dir_name, args.name, prompt.replace(' ','_'),seed))

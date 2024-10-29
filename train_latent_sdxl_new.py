@@ -429,10 +429,7 @@ def main(args):
             block_id = int(name[len("down_blocks.")])
             hidden_size = unet.config.block_out_channels[block_id]
         if "motion_modules" in name:
-            if args.enable_update_motion:
-                attn_procs[name] = unet.attn_processors[name]
-            else:
-                attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
+            attn_procs[name] = unet.attn_processors[name]
         elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:

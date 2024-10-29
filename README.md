@@ -166,7 +166,7 @@ for image_path in image_path_list:
 ```py
 # Note that the trigger word `img` must follow the class word for personalization
 prompt = "a half-body portrait of a man img wearing the sunglasses in Iron man suit, best quality"
-negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth, grayscale"
+negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch, multiple people, text on the screen, no people, unclear faces), open mouth, grayscale"
 generator = torch.Generator(device=device).manual_seed(42)
 images = pipe(
     prompt=prompt,

@@ -17,14 +17,13 @@
 #   --lr_scheduler="constant" --lr_warmup_steps=0 \
 #   --resume_from_checkpoint="latest" \
 #   --snr_gamma 5.0
-accelerate launch --config_file 'bash/accelerate_config_4a100.yaml' \
-  train_sdxl_lora.py \
-  --pretrained_model_name_or_path="./pretrain_model/stable-diffusion-xl-base-1.0" \
+accelerate launch --config_file 'bash/accelerate_config_4a100_zero1.yaml' \
+  train_sdxl_lora_textual.py \
+  --pretrained_model_name_or_path="./pretrain_model/RealVisXL_V4.0" \
   --train_data_dir "datasets/CeleV-Text" \
   --checkpointing_steps=5000 \
-  --unet_inject_txt "block.txt" \
-  --output_dir "checkpoints/train_sdxl_lora_new" \
-  --checkpoints_total_limit=10 \
+  --output_dir "checkpoints/train_sdxl_lora_textual_1007" \
+  --checkpoints_total_limit=50 \
   --num_train_epochs=20 \
   --train_batch_size=1 \
   --gradient_accumulation_steps=1 \

@@ -109,7 +109,7 @@ latent = latent['latent']
 dir_name = "___5yD2BVx8_4_0"
 ## Note that the trigger word `img` must follow the class word for personalization
 prompts = load_prompts(args.prompt)
-negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
+negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch, multiple people, text on the screen, no people, unclear faces), open mouth"
 
 face_id_embeds = data['face_ids'][0].to("cuda")
 

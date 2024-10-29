@@ -297,6 +297,11 @@ def parse_args():
         "--enable_update_motion", action="store_true", help="Whether or not to update motion layer."
     )
     parser.add_argument(
+        "--enable_reference_noisy", action="store_true", help="Whether or not to update motion layer."
+    )
+    parser.add_argument("--ref_noisy_ratio", type=float, default=1e-2, help="Weight decay to use.")
+    parser.add_argument("--ref_loss_weight", type=float, default=0.1, help="Weight decay to use.")
+    parser.add_argument(
         "--disable_drop_image", action="store_true", help="Whether or not to close random drop for image condition."
     )
     parser.add_argument(
@@ -423,10 +428,7 @@ def main(args):
             block_id = int(name[len("down_blocks.")])
             hidden_size = unet.config.block_out_channels[block_id]
         if "motion_modules" in name:
-            if args.enable_update_motion:
-                attn_procs[name] = unet.attn_processors[name]
-            else:
-                attn_procs[name] = SkipMotionAttnProcessor2_0(num_frames=16)
+            attn_procs[name] = unet.attn_processors[name]
         elif "encoder_hid_proj" in name:
             attn_procs[name] = unet.attn_processors[name]
         elif cross_attention_dim is None:
@@ -641,7 +643,9 @@ def main(args):
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
-
+                if args.enable_reference_noisy:
+                    ref_timesteps = torch.tensor(int(timesteps * args.ref_noisy_ratio),dtype=torch.int)
+                    ref_latents = noise_scheduler.add_noise(ref_latents, noise, ref_timesteps)
   
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 noisy_latents = torch.cat([noisy_latents, ref_latents], dim=2)
@@ -662,6 +666,7 @@ def main(args):
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
+                ref_pred = model_pred[:,:,-1:,:,:]
                 model_pred = model_pred[:,:,:16,:,:]
                 
                 # Get the target for loss depending on the prediction type
@@ -699,6 +704,9 @@ def main(args):
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
                     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
                     loss = loss.mean()
+                if args.enable_reference_noisy:
+                    ref_loss = F.mse_loss(noise.float(), ref_pred.float(), reduction="mean")
+                    loss = loss + args.ref_loss_weight * ref_loss
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()

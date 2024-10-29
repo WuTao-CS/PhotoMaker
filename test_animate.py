@@ -95,7 +95,7 @@ for image_path in image_path_list:
 
 ## Note that the trigger word `img` must follow the class word for personalization
 prompts = load_prompts(args.prompt)
-negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch), open mouth"
+negative_prompt = "(asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch, multiple people, text on the screen, no people, unclear faces), open mouth"
 
 
 ## Parameter setting

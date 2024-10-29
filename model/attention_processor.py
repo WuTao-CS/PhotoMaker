@@ -853,6 +853,7 @@ class NewLastFrameProjectAttnProcessor2_0:
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         temb: Optional[torch.Tensor] = None,
+        use_origin_attn=False,
         *args,
         **kwargs,
     ) -> torch.Tensor:
@@ -861,11 +862,14 @@ class NewLastFrameProjectAttnProcessor2_0:
             deprecate("scale", "1.0.0", deprecation_message)
         num_frames=self.num_frames
         residual = hidden_states # [b*f,h*w,c]
-        hidden_states = rearrange(hidden_states, '(b f) t c -> b f t c',f=num_frames+1)
-        ref_feature = hidden_states[:,-1:,:,:]
-        if encoder_hidden_states is None:
+        if use_origin_attn is False:
+            hidden_states = rearrange(hidden_states, '(b f) t c -> b f t c',f=num_frames+1)
+            ref_feature = hidden_states[:,-1:,:,:]
+        if encoder_hidden_states is None and use_origin_attn is False:
             is_cross_attention = False
             hidden_states, n_visual = process_latent_tensor(hidden_states) # [b*(f-1),h*w*2,c]
+        elif encoder_hidden_states is None and use_origin_attn is True:
+            is_cross_attention = False
         else:
             is_cross_attention = True
             encoder_hidden_states = rearrange(encoder_hidden_states,'(b f) t c -> b f t c',f=num_frames+1)
@@ -945,7 +949,7 @@ class NewLastFrameProjectAttnProcessor2_0:
             hidden_states = rearrange(hidden_states, '(b f) t c -> b f t c', f=num_frames)
             hidden_states = torch.cat((hidden_states, ref_feature), dim=1)
             hidden_states = rearrange(hidden_states, 'b f t c -> (b f) t c')
-        else:
+        elif use_origin_attn is False:
             hidden_states = rearrange(hidden_states, '(b f) t c -> b f t c', f=num_frames)
             hidden_states, ref_frame_result = hidden_states[:,:,:n_visual,:], hidden_states[:,:,n_visual:,:]
             ref_frame_result = torch.mean(ref_frame_result, dim=1, keepdim=True)

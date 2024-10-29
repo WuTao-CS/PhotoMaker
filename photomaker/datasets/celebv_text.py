@@ -108,7 +108,7 @@ class CelebVTextProcessDataset(torch.utils.data.Dataset):
             "celebvtext_6",
             f"{name}.mp4",
         )
-        video_reader = VideoReader(video_path, ctx=cpu(0), width=self.resolution[1], height=self.resolution[0])
+        video_reader = VideoReader(video_path, ctx=cpu(), width=self.resolution[1], height=self.resolution[0])
         if len(video_reader) < self.video_length:
             self.faild_case.append(video_path)
             return {}
