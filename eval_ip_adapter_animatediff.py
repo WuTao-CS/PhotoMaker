@@ -76,8 +76,9 @@ def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42], help="seed for seed_everything")
     parser.add_argument("-p", "--prompt", type=str, default='benchmark.txt', help="prompt file path")
+    parser.add_argument("--image_dir", type=str, default='datasets/Famous_people',help="image")
     parser.add_argument("-o","--output", type=str, default='outputs', help="output dir")
-    parser.add_argument("-n", "--num_steps", type=int, default=50, help="number of steps")
+    parser.add_argument("-n", "--num_steps", type=int, default=30, help="number of steps")
     parser.add_argument("--size",type=int, default=512, help="size of image")
     parser.add_argument("--version", type=str, default="ip-adapter_sd15.bin")
     parser.add_argument("--phase",type=int,default=0)
@@ -128,8 +129,8 @@ app = FaceAnalysis(name="buffalo_l",
                     providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
 
 app.prepare(ctx_id=0, det_size=(640,640))
-image_basename_list =[base_name for base_name in os.listdir("datasets/Famous_people/") if isimage(base_name)]
-image_path_list = sorted([os.path.join("datasets/Famous_people/", basename) for basename in image_basename_list])
+image_basename_list =[base_name for base_name in os.listdir(args.image_dir) if isimage(base_name)]
+image_path_list = sorted([os.path.join(args.image_dir, basename) for basename in image_basename_list])
 
 
 
@@ -207,7 +208,3 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     total_face_similarity.append(np.nanmean(all_face_similarity))
 
 
-# res = {'clip_t': np.mean(total_clip_t),'frame_c': np.mean(total_frame_c), 'clip_i': np.mean(total_clip_i), 'dino_i': np.mean(total_dino_i), 'face_similarity': np.mean(total_face_similarity)}
-# # write res to json
-# with open("{}/result.json".format(args.output), "w") as f:
-#     json.dump(res, f, indent=4)

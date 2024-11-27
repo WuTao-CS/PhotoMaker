@@ -1,14 +1,19 @@
-
+echo 'Begin to install python packages...'
+nvidia-smi
+conda init
+source ~/.bashrc
+echo "conda activate env-novelai"
+conda activate env-novelai 
 cd /group/40034/jackeywu/code/PhotoMaker/
-
-CUDA_VISIBLE_DEVICES=0 python latent_gudience_infer.py \
-    -i 'datasets/lecun/yann-lecun.jpg' \
-    --unet_path 'checkpoints/sd15_latent_new_lr_1e-5_4a100-motion-update-1022-with-ref-noisy-cross-attn-only-face/checkpoint-95000/pytorch_model.bin' \
-    --output 'outputs/sd15_latent_new_lr_1e-5_4a100-motion-update-1022-with-ref-noisy-cross-attn-only-face/checkpoint-95000/' \
-    --enable_origin_cross_attn \
-    --enable_update_motion \
-    --enable_crop_face
+PHASE=0
 
 
+CUDA_VISIBLE_DEVICES=$PHASE python eval_ip_adapter_animatediff_object.py \
+        --image_dir 'datasets/object_benchmark_seg/bear' \
+        --version 'ip-adapter-plus_sd15.bin' \
+        --output 'outputs/object_bench/ip-adapter-object' \
 
-
+CUDA_VISIBLE_DEVICES=$PHASE python eval_ip_adapter_animatediff_object.py \
+        --image_dir 'datasets/object_benchmark_seg/bear' \
+        --version 'ip-adapter-plus_sd15.bin' \
+        --output 'outputs/object_bench/ip-adapter-plus-object' \

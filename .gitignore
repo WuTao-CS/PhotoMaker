@@ -14,3 +14,5 @@ checkpoints*
 sh_checkpoints/*
 outputs_bak/*
 outputs_seed/*
+outputs_final/*
+eval/RAFT/models/*

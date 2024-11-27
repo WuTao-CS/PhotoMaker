@@ -66,6 +66,7 @@ def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument("-s", "--seed", type=int, nargs='+',default=[42,128], help="seed for seed_everything")
     parser.add_argument("-p", "--prompt", type=str, default='benchmark.txt', help="prompt file path")
+    parser.add_argument("-i", "--image", type=str, default='datasets/Famous_people/', help="prompt file path")
     parser.add_argument("--unet_path", type=str, help="image", default=None)
     parser.add_argument("-o","--output", type=str, default='outputs', help="output dir")
     parser.add_argument("--name", type=str, default='photomaker_mix', help="output name")
@@ -88,7 +89,7 @@ def get_parser(**parser_kwargs):
         "--enable_reference_image_noisy", action="store_true", help="Whether or not to use origin cross-attention."
     )
     parser.add_argument("--phase",type=int,default=0)
-    parser.add_argument("--total",type=int,default=8)
+    parser.add_argument("--total",type=int,default=4)
     return parser
 
 def load_prompts(prompt_file):
@@ -137,8 +138,8 @@ print("over")
 # define and show the input ID images
 pipe.enable_vae_slicing()
 pipe.enable_vae_tiling()
-image_basename_list =[base_name for base_name in os.listdir("datasets/Famous_people/") if isimage(base_name)]
-image_path_list = sorted([os.path.join("datasets/Famous_people/", basename) for basename in image_basename_list])
+image_basename_list =[base_name for base_name in os.listdir(args.image) if isimage(base_name)]
+image_path_list = sorted([os.path.join(args.image, basename) for basename in image_basename_list])
 
 per_devie_num = len(image_path_list)/args.total
 start = int(args.phase*per_devie_num)

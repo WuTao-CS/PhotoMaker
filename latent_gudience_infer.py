@@ -142,7 +142,7 @@ for image_path,input_id_image in zip(image_path_list, input_id_images):
     
     dir_name = os.path.basename(image_path).split('.')[0]
     ## Note that the trigger word `img` must follow the class word for personalization
-    prompts = load_prompts(args.prompt)
+    prompts = args.prompt
     negative_prompt = "asymmetry, worst quality, low quality, illustration, 3d, 2d, painting, cartoons, sketch"
     # print(input_id_images[0] if args.ip_adapter else None)
     seed_list = args.seed

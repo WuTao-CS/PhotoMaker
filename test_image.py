@@ -43,8 +43,8 @@ def extract_face_features(image_lst: list, input_size=(640, 640)):
         ref_images_emb = torch.stack(ref_images_emb, dim=0).unsqueeze(0)
 
     return ref_images, ref_images_emb
-image_basename_list =[base_name for base_name in os.listdir("datasets/Famous_people") if isimage(base_name)]
-image_path_list = sorted([os.path.join("datasets/Famous_people", basename) for basename in image_basename_list])
+image_basename_list =[base_name for base_name in os.listdir("datasets/common_person") if isimage(base_name)]
+image_path_list = sorted([os.path.join("datasets/common_person", basename) for basename in image_basename_list])
 input_id_images=[]
 target_dir='./datasets/common_people/'
 for image_path in image_path_list:
@@ -52,10 +52,6 @@ for image_path in image_path_list:
     ref_image = extract_face_features([input_id_image])[0]
     if ref_image is None:
         print(image_path)
-    else:
-        target_path=os.path.join(target_dir,os.path.basename(image_path))
-        copyfile(image_path,target_path)
-        input_id_images.append(image_path)
 
 print(len(input_id_images))
 print(input_id_images)
