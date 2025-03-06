@@ -16,3 +16,5 @@ outputs_bak/*
 outputs_seed/*
 outputs_final/*
 eval/RAFT/models/*
+outputs_final_two/*
+papar_results_log/*

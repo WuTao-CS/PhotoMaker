@@ -2,10 +2,10 @@ nohup bash bash/1_test.sh > card1.log 2>&1 &
 nohup bash bash/2_test.sh > card2.log 2>&1 &
 nohup bash bash/3_test.sh > card3.log 2>&1 &
 nohup bash bash/4_test.sh > card4.log 2>&1 &
-nohup bash bash/5_test.sh > card5.log 2>&1 &
-nohup bash bash/6_test.sh > card6.log 2>&1 &
-nohup bash bash/7_test.sh > card7.log 2>&1 &
-nohup bash bash/8_test.sh > card8.log 2>&1 &
+# nohup bash bash/5_test.sh > card5.log 2>&1 &
+# nohup bash bash/6_test.sh > card6.log 2>&1 &
+# nohup bash bash/7_test.sh > card7.log 2>&1 &
+# nohup bash bash/8_test.sh > card8.log 2>&1 &
 
 # nohup bash bash/9_test.sh > card9.log 2>&1 &
 # nohup bash bash/10_test.sh > card10.log 2>&1 &

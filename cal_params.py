@@ -6,7 +6,7 @@ from PIL import Image
 
 
 from diffusers.utils import load_image
-from diffusers import EulerDiscreteScheduler, DDIMScheduler
+from diffusers import EulerDiscreteScheduler, DDIMScheduler, AnimateDiffPipeline
 from huggingface_hub import hf_hub_download
 import sys
 import torch
@@ -26,9 +26,9 @@ from insightface.utils import face_align
 # gloal variable and function
 import argparse
 
-base_model_path = './pretrain_model/Realistic_Vision_V5.1_noVAE'
+base_model_path = './pretrain_model/Realistic_Vision_V6.0_B1_noVAE'
 device = "cuda"
-adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-v1-5-3")
+adapter = MotionAdapter.from_pretrained("./pretrain_model/animatediff-motion-adapter-v1-5-2")
 
 scheduler = DDIMScheduler.from_pretrained(
     base_model_path,
@@ -38,7 +38,7 @@ scheduler = DDIMScheduler.from_pretrained(
     beta_schedule="linear",
     steps_offset=1,
 )
-pipe = VAETimeProjectAnimateDiffPipeline.from_pretrained(
+pipe = AnimateDiffPipeline.from_pretrained(
     base_model_path,
     motion_adapter=adapter,
     scheduler=scheduler,

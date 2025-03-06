@@ -11,12 +11,13 @@ PHASE=0
 TOTOAL=8
 
 
-CUDA_VISIBLE_DEVICES=$PHASE python eval_ip_adapter_animatediff.py \
-    --output 'outputs_final/common_person_bench/ip-adapter_plus_new/' \
-    --phase $PHASE \
-    --seed 42 \
-    --image_dir 'datasets/common_person' \
-    --prompt 'new_person_prompt.txt' \
-    --version 'ip-adapter-plus_sd15.bin' \
-    --total $TOTOAL \
-    -n 30
+CUDA_VISIBLE_DEVICES=0 python inference_canny_many_batch.py \
+    --output 'outputs_final_test/sd15_select_4_canny_self-attn_1218-4card-motion/checkpoint-100000/' \
+    --unet_path "checkpoints/sd15_select_4_canny_self-attn_1218-4card-motion/checkpoint-100000/pytorch_model.bin" \
+    --num_reference_frame 4
+
+
+CUDA_VISIBLE_DEVICES=0 python inference_canny_many_batch.py \
+    --output 'outputs_final_test/sd15_select_4_canny_self-attn_1218-4card-motion/checkpoint-100000/' \
+    --unet_path "checkpoints/sd15_select_4_canny_self-attn_1218-4card-motion/checkpoint-100000/pytorch_model.bin" \
+    --num_reference_frame 4

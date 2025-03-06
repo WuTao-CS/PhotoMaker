@@ -196,7 +196,7 @@ if __name__ == "__main__":
         for video in os.listdir(dir):
             if video.endswith('.gif') or video.endswith('.mp4'):
                 video_list.append(os.path.join(dir, video))
-        
+    print(video_list)
     all_results, video_results = compute_dynamic_degree(video_list, device)
     result = {}
     result['mean_dd'] = all_results

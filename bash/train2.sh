@@ -7,46 +7,29 @@ conda activate env-novelai
 cd /group/40034/jackeywu/code/PhotoMaker/
 
 
-# accelerate launch --config_file 'bash/accelerate_config_4a100_zero1.yaml' \
-#   train_latent_new_motion_cross_atten.py \
-#   --pretrained_model_name_or_path="./pretrain_model/Realistic_Vision_V5.1_noVAE" \
-#   --train_data_dir "datasets/CeleV-Text" \
-#   --checkpointing_steps=10000 \
-#   --resolution 512 \
-#   --output_dir "checkpoints/sd15_latent_new_lr_1e-5_4a100-with-motion-no-update-1011-cross" \
-#   --checkpoints_total_limit=50 \
-#   --max_train_steps 200000 \
-#   --train_batch_size=1 \
-#   --gradient_accumulation_steps=1 \
-#   --gradient_checkpointing \
-#   --learning_rate=1e-5 \
-#   --max_grad_norm=1 \
-#   --lr_scheduler="constant" --lr_warmup_steps=0 \
-#   --resume_from_checkpoint="latest" \
-#   --enable_update_motion \
-#   --snr_gamma 5.0
-
 accelerate launch --config_file 'bash/accelerate_config_4a100_zero1.yaml' \
-  train_latent_new_ffhq.py \
+  train_canny_multi.py \
   --pretrained_model_name_or_path="./pretrain_model/Realistic_Vision_V5.1_noVAE" \
-  --train_data_dir "datasets/ffhq" \
-  --checkpointing_steps=10000 \
+  --train_data_dir "datasets/CeleV-Text" \
+  --checkpointing_steps=5000 \
   --resolution 512 \
-  --output_dir "checkpoints/sd15_latent_new_lr_1e-5_4a100-motion-noupdate-1026-ref-noisy" \
-  --checkpoints_total_limit=50 \
+  --output_dir "checkpoints/sd15_select_4_canny_self-attn_1218-4card-motion" \
+  --checkpoints_total_limit=10 \
   --max_train_steps 200000 \
   --train_batch_size=1 \
   --gradient_accumulation_steps=1 \
   --gradient_checkpointing \
   --learning_rate=1e-5 \
   --max_grad_norm=1 \
+  --num_reference_frame 4 \
   --lr_scheduler="constant" --lr_warmup_steps=0 \
   --resume_from_checkpoint="latest" \
   --snr_gamma 5.0 \
+  --enable_update_motion \
   --enable_reference_noisy \
+  --with_vae \
   --ref_noisy_ratio 0.01 \
   --ref_loss_weight 0.1 \
-  --enable_origin_cross_attn \
+  --enable_new_prompt \
   --refer_noisy_type "random" \
-  --frame_stride 4 
-
+  --frame_stride 4
